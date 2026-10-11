@@ -1,0 +1,13 @@
+hello
+Ada
+{"data":{"hello":"hello","user":{"name":"Ada","role":"USER","__typename":"User"},"__typename":"Query"}}
+{"data":{"rename":{"id":"8","name":"Sam"}}}
+{"data":null,"errors":[{"message":"graphql validation: unknown field notAField on Query"}]}
+{"data":null,"errors":[{"message":"graphql validation: unknown input field unknown"}]}
+{"data":null,"errors":[{"message":"graphql validation: unknown object type Missing"}]}
+{"data":{"hello":"hello","user":null},"errors":[{"message":"resolver failed"}]}
+{"data":null,"errors":[{"message":"resolver failed"}]}
+{"data":{"over":["small",null]},"errors":[{"message":"result could not be encoded"}]}
+{"data":{"strictOver":null},"errors":[{"message":"result could not be encoded"}]}
+{"data":{"user":{"id":"7"}}}
+{"data":null,"errors":[{"message":"graphql Int: value is outside the signed 32-bit range"}]}

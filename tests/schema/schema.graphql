@@ -1,0 +1,30 @@
+enum Role { USER ADMIN }
+
+input ScopeFilter {
+  id: ID!
+}
+
+input UserFilter {
+  role: Role
+  active: Boolean = true
+  tenantId: ID!
+  scopes: [ScopeFilter!]!
+}
+
+type Query {
+  hello(who: String, filter: UserFilter): String!
+  user(id: ID!): User
+  integer(value: Int!): Int!
+  over: [String]!
+  strictOver: [String!]
+}
+
+type User {
+  id: ID!
+  name: String!
+  role: Role!
+}
+
+type Mutation {
+  rename(id: ID!, name: String!): User!
+}
