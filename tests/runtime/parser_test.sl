@@ -206,6 +206,23 @@ fn test_graphql_configurable_limits() {
            "selection depth limit enforced");
     assert(is_err(parse("query { a b c }", limits)),
            "node budget enforced");
+
+    let parsed = parse("query { a b }", default_limits());
+    guard let doc = parsed else let e = err_of(parsed) { panic(e); }
+    let operation_result = validate_document(doc, "");
+    guard let operation = operation_result else let e = err_of(operation_result) { panic(e); }
+    let variables_result = parse_variables(b"{}", default_limits());
+    guard let variables = variables_result else let e = err_of(variables_result) { panic(e); }
+    let budget = expansion_budget(default_limits());
+    let expanded_result = collect_selections_budget(
+        doc, operation.selections, "Query", variables, operation,
+        default_limits(), budget);
+    guard let expanded = expanded_result else let e = err_of(expanded_result) { panic(e); }
+    let execution_budget = ExpansionBudget { count: 0, max: 3 };
+    assert(charge_expanded_selection_budget(expanded, execution_budget),
+           "cached expansion charges the first execution");
+    assert(!charge_expanded_selection_budget(expanded, execution_budget),
+           "cached expansion preserves the repeated execution node bound");
 }
 
 fn test_graphql_response_is_bounded_and_valid_json() {

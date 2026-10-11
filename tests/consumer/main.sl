@@ -69,15 +69,28 @@ let name_result = graphql_call_User_name(user, __graphql.no_args(), __graphql.co
 guard let name = name_result else let e = err_of(name_result) { panic(e); }
 println(name);
 
-let query_result = graphql_execute(
+let fetch_query =
     "query Fetch($id: ID!, $who: String = \"agent\", $showRole: Boolean = true, $filter: UserFilter!) { " +
     "hello(who: $who, filter: $filter) user(id: $id) { ...UserFields __typename } __typename } " +
-    "fragment UserFields on User { name role @include(if: $showRole) }",
-    "Fetch", b"{\"id\":\"7\",\"filter\":{\"tenantId\":\"tenant-1\",\"scopes\":{\"id\":\"scope-1\"}}}",
+    "fragment UserFields on User { name role @include(if: $showRole) }";
+let fetch_variables = b"{\"id\":\"7\",\"filter\":{\"tenantId\":\"tenant-1\",\"scopes\":{\"id\":\"scope-1\"}}}";
+let query_result = graphql_execute(
+    fetch_query,
+    "Fetch", fetch_variables,
     __graphql.context_new(), __graphql.default_limits());
 guard let query_response = query_result else let e = err_of(query_result) { panic(e); }
 println(strings.from_bytes(query_response, 0, len(query_response)));
 
+let prepared_result = graphql_prepare(fetch_query, "Fetch", __graphql.default_limits());
+guard let prepared = prepared_result else let e = err_of(prepared_result) { panic(e); }
+let prepared_response_result = graphql_execute_prepared(
+    prepared, fetch_variables, __graphql.context_new());
+guard let prepared_response = prepared_response_result else let e = err_of(prepared_response_result) { panic(e); }
+if prepared_response != query_response { panic("prepared GraphQL response differs from graphql_execute"); }
+let prepared_repeat_result = graphql_execute_prepared(
+    prepared, fetch_variables, __graphql.context_new());
+guard let prepared_repeat = prepared_repeat_result else let e = err_of(prepared_repeat_result) { panic(e); }
+if prepared_repeat != query_response { panic("prepared GraphQL query changed on reuse"); }
 let mutation_result = graphql_execute(
     "mutation Rename($id: ID!) { rename(id: $id, name: \"Sam\") { id name } }",
     "Rename", b"{\"id\":\"8\"}", __graphql.context_new(), __graphql.default_limits());
@@ -88,6 +101,12 @@ let invalid_result = graphql_execute(
     "query { notAField }", "", b"{}", __graphql.context_new(), __graphql.default_limits());
 guard let invalid_response = invalid_result else let e = err_of(invalid_result) { panic(e); }
 println(strings.from_bytes(invalid_response, 0, len(invalid_response)));
+let invalid_prepared_result = graphql_prepare("query { notAField }", "", __graphql.default_limits());
+guard let invalid_prepared = invalid_prepared_result else let e = err_of(invalid_prepared_result) { panic(e); }
+let invalid_prepared_exec_result = graphql_execute_prepared(
+    invalid_prepared, b"{}", __graphql.context_new());
+guard let invalid_prepared_response = invalid_prepared_exec_result else let e = err_of(invalid_prepared_exec_result) { panic(e); }
+if invalid_prepared_response != invalid_response { panic("prepared GraphQL validation differs from graphql_execute"); }
 
 let bad_input_result = graphql_execute(
     "query { hello(filter: {tenantId: \"tenant-1\", unknown: 1}) }", "", b"{}",

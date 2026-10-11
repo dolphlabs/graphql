@@ -98,27 +98,122 @@ pub fn graphql_call_Mutation_rename(parent: __graphql.Root, args: Mutation_renam
     return resolve_Mutation_rename(parent, args, ctx);
 }
 
-// Parse, validate, dispatch and serialize one request-local operation.
-pub fn graphql_execute(query: str, operation_name: str, variables_json: bytes, context: graphql.Context, limits: __graphql.Limits) -> result[bytes, str] {
+// Reuse validated selections and typed arguments during execution.
+gc struct graphql_ExpansionEntry { type_id: int, incoming: [__graphql.Selection], expanded: [__graphql.Selection] }
+gc struct graphql_ArgsEntry_Query_hello { selection: __graphql.Selection, args: Query_hello_Args }
+gc struct graphql_ArgsEntry_Query_user { selection: __graphql.Selection, args: Query_user_Args }
+gc struct graphql_ArgsEntry_Query_integer { selection: __graphql.Selection, args: Query_integer_Args }
+gc struct graphql_ArgsEntry_Mutation_rename { selection: __graphql.Selection, args: Mutation_rename_Args }
+
+gc struct graphql_ExecutionPlan {
+    expansions: [graphql_ExpansionEntry],
+    args_Query_hello: [graphql_ArgsEntry_Query_hello],
+    args_Query_user: [graphql_ArgsEntry_Query_user],
+    args_Query_integer: [graphql_ArgsEntry_Query_integer],
+    args_Mutation_rename: [graphql_ArgsEntry_Mutation_rename]
+}
+
+fn graphql_same_selection_list(a: [__graphql.Selection], b: [__graphql.Selection]) -> bool {
+    if len(a) != len(b) { return false; }
+    for i in 0..len(a) {
+        let left = a[i];
+        let right = b[i];
+        if left.kind != right.kind || left.name.start != right.name.start || left.name.end != right.name.end || left.alias.start != right.alias.start || left.alias.end != right.alias.end || left.type_condition.start != right.type_condition.start || left.type_condition.end != right.type_condition.end { return false; }
+    }
+    return true;
+}
+
+fn graphql_expansion_index(plan: graphql_ExecutionPlan, type_id: int, incoming: [__graphql.Selection]) -> int {
+    for i in 0..len(plan.expansions) {
+        let entry = plan.expansions[i];
+        if entry.type_id == type_id && graphql_same_selection_list(entry.incoming, incoming) { return i; }
+    }
+    return -1;
+}
+
+fn graphql_args_index_Query_hello(plan: graphql_ExecutionPlan, selection: __graphql.Selection) -> int {
+    for i in 0..len(plan.args_Query_hello) {
+        let planned = plan.args_Query_hello[i].selection;
+        if planned.name.start == selection.name.start && planned.name.end == selection.name.end && planned.alias.start == selection.alias.start && planned.alias.end == selection.alias.end { return i; }
+    }
+    return -1;
+}
+
+fn graphql_args_index_Query_user(plan: graphql_ExecutionPlan, selection: __graphql.Selection) -> int {
+    for i in 0..len(plan.args_Query_user) {
+        let planned = plan.args_Query_user[i].selection;
+        if planned.name.start == selection.name.start && planned.name.end == selection.name.end && planned.alias.start == selection.alias.start && planned.alias.end == selection.alias.end { return i; }
+    }
+    return -1;
+}
+
+fn graphql_args_index_Query_integer(plan: graphql_ExecutionPlan, selection: __graphql.Selection) -> int {
+    for i in 0..len(plan.args_Query_integer) {
+        let planned = plan.args_Query_integer[i].selection;
+        if planned.name.start == selection.name.start && planned.name.end == selection.name.end && planned.alias.start == selection.alias.start && planned.alias.end == selection.alias.end { return i; }
+    }
+    return -1;
+}
+
+fn graphql_args_index_Mutation_rename(plan: graphql_ExecutionPlan, selection: __graphql.Selection) -> int {
+    for i in 0..len(plan.args_Mutation_rename) {
+        let planned = plan.args_Mutation_rename[i].selection;
+        if planned.name.start == selection.name.start && planned.name.end == selection.name.end && planned.alias.start == selection.alias.start && planned.alias.end == selection.alias.end { return i; }
+    }
+    return -1;
+}
+
+// A caller-owned parsed operation. Keep one handle per persisted operation.
+pub gc struct graphql_PreparedQuery { document: __graphql.Document, operation: __graphql.Operation, limits: __graphql.Limits }
+struct graphql_ParsedQuery { document: __graphql.Document, operation: __graphql.Operation }
+
+fn graphql_parse_query(query: str, operation_name: str, limits: __graphql.Limits) -> result[graphql_ParsedQuery, str] {
     let parsed_result = __graphql.parse(query, limits);
-    guard let doc = parsed_result else let e = err_of(parsed_result) { return __graphql.failure(e, limits); }
+    guard let doc = parsed_result else let e = err_of(parsed_result) { return err(e); }
     let condition_result = __graphql.type_conditions(doc, limits);
-    guard let conditions = condition_result else let e = err_of(condition_result) { return __graphql.failure(e, limits); }
+    guard let conditions = condition_result else let e = err_of(condition_result) { return err(e); }
     for i in 0..len(conditions) {
-        if !graphql_schema_has_object_type(conditions[i]) { return __graphql.failure("graphql validation: unknown object type " + conditions[i], limits); }
+        if !graphql_schema_has_object_type(conditions[i]) { return err("graphql validation: unknown object type " + conditions[i]); }
     }
     let operation_result = __graphql.validate_document(doc, operation_name);
-    guard let operation = operation_result else let e = err_of(operation_result) { return __graphql.failure(e, limits); }
+    guard let operation = operation_result else let e = err_of(operation_result) { return err(e); }
+    return ok(graphql_ParsedQuery { document: doc, operation: operation });
+}
+
+pub fn graphql_prepare(query: str, operation_name: str, limits: __graphql.Limits) -> result[graphql_PreparedQuery, str] {
+    let parsed_result = graphql_parse_query(query, operation_name, limits);
+    guard let parsed = parsed_result else let e = err_of(parsed_result) { return err(e); }
+    return ok(graphql_PreparedQuery { document: parsed.document, operation: parsed.operation, limits: limits });
+}
+
+pub fn graphql_execute(query: str, operation_name: str, variables_json: bytes, context: graphql.Context, limits: __graphql.Limits) -> result[bytes, str] {
+    let parsed_result = graphql_parse_query(query, operation_name, limits);
+    guard let parsed = parsed_result else let e = err_of(parsed_result) { return __graphql.failure(e, limits); }
+    return graphql_execute_document(parsed.document, parsed.operation, variables_json, context, limits);
+}
+
+pub fn graphql_execute_prepared(prepared: graphql_PreparedQuery, variables_json: bytes, context: graphql.Context) -> result[bytes, str] {
+    return graphql_execute_document(prepared.document, prepared.operation, variables_json, context, prepared.limits);
+}
+
+fn graphql_execute_document(doc: __graphql.Document, operation: __graphql.Operation, variables_json: bytes, context: graphql.Context, limits: __graphql.Limits) -> result[bytes, str] {
     let variables_result = __graphql.parse_variables(variables_json, limits);
     guard let variables = variables_result else let e = err_of(variables_result) { return __graphql.failure(e, limits); }
     let errors_result = __graphql.errors_new(100);
     guard let errors = errors_result else let e = err_of(errors_result) { return err(e); }
+    let args_plan = graphql_ExecutionPlan {
+        expansions: [],
+        args_Query_hello: [],
+        args_Query_user: [],
+        args_Query_integer: [],
+        args_Mutation_rename: []
+    };
     if operation.kind == __graphql.OP_QUERY {
         let validation_budget = __graphql.expansion_budget(limits);
-        let checked = graphql_validate_Query(operation.selections, doc, variables, operation, context, limits, validation_budget, 0);
+        let checked = graphql_validate_Query(operation.selections, doc, variables, operation, context, limits, args_plan, validation_budget, 0);
         guard let _valid = checked else let e = err_of(checked) { return __graphql.failure(e, limits); }
         let execution_budget = __graphql.expansion_budget(limits);
-        let execution = graphql_emit_Query(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, execution_budget, 0);
+        let execution = graphql_emit_Query(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, args_plan, execution_budget, 0);
         let data = b"null";
         if let value = execution { data = value; } else let e = err_of(execution) {
             if e != "graphql_nonnull_bubble" {
@@ -130,10 +225,10 @@ pub fn graphql_execute(query: str, operation_name: str, variables_json: bytes, c
     }
     if operation.kind == __graphql.OP_MUTATION {
         let validation_budget = __graphql.expansion_budget(limits);
-        let checked = graphql_validate_Mutation(operation.selections, doc, variables, operation, context, limits, validation_budget, 0);
+        let checked = graphql_validate_Mutation(operation.selections, doc, variables, operation, context, limits, args_plan, validation_budget, 0);
         guard let _valid = checked else let e = err_of(checked) { return __graphql.failure(e, limits); }
         let execution_budget = __graphql.expansion_budget(limits);
-        let execution = graphql_emit_Mutation(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, execution_budget, 0);
+        let execution = graphql_emit_Mutation(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, args_plan, execution_budget, 0);
         let data = b"null";
         if let value = execution { data = value; } else let e = err_of(execution) {
             if e != "graphql_nonnull_bubble" {
@@ -307,37 +402,67 @@ fn graphql_normalize_arg_Query_hello_filter_0(raw: bytes, limits: __graphql.Limi
     return graphql_normalize_input_UserFilter(raw, limits, depth + 1);
 }
 
-fn graphql_resolver_args_Query_hello(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Query_hello_Args, str] {
-    let args_json_result = __graphql.arguments_json(doc, selection, variables, operation, limits, [__graphql.ArgSpec { name: "who", type_ref: "String", required: false, has_default: false, default_json: b"" }, __graphql.ArgSpec { name: "filter", type_ref: "UserFilter", required: false, has_default: false, default_json: b"" }]);
-    guard let args_json = args_json_result else let e = err_of(args_json_result) { return err(e); }
-    let fields_result = __graphql.parse_input_object(args_json, limits);
-    guard let fields = fields_result else let e = err_of(fields_result) { return err(e); }
-    let known_result = __graphql.validate_object_keys(fields, ["who", "filter"]);
-    guard let _known = known_result else let e = err_of(known_result) { return err(e); }
-    let out = builder.new_bytes();
-    out.write_byte(123);
-    let written = 0;
-    let value_result_0 = __graphql.variables_get(fields, "who");
-    if let raw_value_0 = value_result_0 {
-        let normalized_result_0 = graphql_normalize_arg_Query_hello_who_0(raw_value_0, limits, 0);
-        guard let normalized_0 = normalized_result_0 else let e = err_of(normalized_result_0) { return err(e); }
-        if written > 0 { out.write_byte(44); }
-        out.write(b"\"who\":");
-        out.write(normalized_0);
-        written = written + 1;
+fn graphql_resolver_arg_Query_hello_who(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[opt[str], str] {
+    let found = __graphql.find_argument(doc, selection, "who");
+    let raw = b"";
+    if let _ = found {
+        guard let argument = found else { return err("graphql validation: argument lookup failed"); }
+        let variable_type = __graphql.validate_variable_type(doc, operation, argument.value, "String", false);
+        guard let _type_ok = variable_type else let e = err_of(variable_type) { return err(e); }
+        if __graphql.variable_missing(doc, argument.value, variables, operation) {
+            return ok(none);
+        } else {
+            let value_result = __graphql.value_json(doc, argument.value, variables, operation, limits);
+            guard let value = value_result else let e = err_of(value_result) { return err(e); }
+            raw = value;
+        }
+    } else {
+        return ok(none);
     }
-    let value_result_1 = __graphql.variables_get(fields, "filter");
-    if let raw_value_1 = value_result_1 {
-        let normalized_result_1 = graphql_normalize_arg_Query_hello_filter_0(raw_value_1, limits, 0);
-        guard let normalized_1 = normalized_result_1 else let e = err_of(normalized_result_1) { return err(e); }
-        if written > 0 { out.write_byte(44); }
-        out.write(b"\"filter\":");
-        out.write(normalized_1);
-        written = written + 1;
-    }
-    out.write_byte(125);
-    let typed_result: result[Query_hello_Args, str] = json.decode(out.finish());
+    let normalized_result = graphql_normalize_arg_Query_hello_who_0(raw, limits, 0);
+    guard let normalized = normalized_result else let e = err_of(normalized_result) { return err(e); }
+    let typed_result: result[opt[str], str] = json.decode(normalized);
     return typed_result;
+}
+
+fn graphql_resolver_arg_Query_hello_filter(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[opt[UserFilter], str] {
+    let found = __graphql.find_argument(doc, selection, "filter");
+    let raw = b"";
+    if let _ = found {
+        guard let argument = found else { return err("graphql validation: argument lookup failed"); }
+        let variable_type = __graphql.validate_variable_type(doc, operation, argument.value, "UserFilter", false);
+        guard let _type_ok = variable_type else let e = err_of(variable_type) { return err(e); }
+        if __graphql.variable_missing(doc, argument.value, variables, operation) {
+            return ok(none);
+        } else {
+            let value_result = __graphql.value_json(doc, argument.value, variables, operation, limits);
+            guard let value = value_result else let e = err_of(value_result) { return err(e); }
+            raw = value;
+        }
+    } else {
+        return ok(none);
+    }
+    let normalized_result = graphql_normalize_arg_Query_hello_filter_0(raw, limits, 0);
+    guard let normalized = normalized_result else let e = err_of(normalized_result) { return err(e); }
+    let typed_result: result[opt[UserFilter], str] = json.decode(normalized);
+    return typed_result;
+}
+
+fn graphql_resolver_args_Query_hello(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Query_hello_Args, str] {
+    for i in 0..len(selection.arguments) {
+        let actual = __graphql.span_text(doc.source, selection.arguments[i].name);
+        if actual == "who" { continue; }
+        if actual == "filter" { continue; }
+        return err("graphql validation: unknown argument " + actual);
+    }
+    let arg_result_0 = graphql_resolver_arg_Query_hello_who(doc, selection, variables, operation, limits);
+    guard let arg_0 = arg_result_0 else let e = err_of(arg_result_0) { return err(e); }
+    let arg_result_1 = graphql_resolver_arg_Query_hello_filter(doc, selection, variables, operation, limits);
+    guard let arg_1 = arg_result_1 else let e = err_of(arg_result_1) { return err(e); }
+    return ok(Query_hello_Args {
+        who: arg_0,
+        filter: arg_1
+    });
 }
 
 fn graphql_normalize_arg_Query_user_id_0(raw: bytes, limits: __graphql.Limits, depth: int) -> result[bytes, str] {
@@ -346,28 +471,40 @@ fn graphql_normalize_arg_Query_user_id_0(raw: bytes, limits: __graphql.Limits, d
     return __graphql.normalize_id(raw);
 }
 
-fn graphql_resolver_args_Query_user(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Query_user_Args, str] {
-    let args_json_result = __graphql.arguments_json(doc, selection, variables, operation, limits, [__graphql.ArgSpec { name: "id", type_ref: "ID!", required: true, has_default: false, default_json: b"" }]);
-    guard let args_json = args_json_result else let e = err_of(args_json_result) { return err(e); }
-    let fields_result = __graphql.parse_input_object(args_json, limits);
-    guard let fields = fields_result else let e = err_of(fields_result) { return err(e); }
-    let known_result = __graphql.validate_object_keys(fields, ["id"]);
-    guard let _known = known_result else let e = err_of(known_result) { return err(e); }
-    let out = builder.new_bytes();
-    out.write_byte(123);
-    let written = 0;
-    let value_result_0 = __graphql.variables_get(fields, "id");
-    if let raw_value_0 = value_result_0 {
-        let normalized_result_0 = graphql_normalize_arg_Query_user_id_0(raw_value_0, limits, 0);
-        guard let normalized_0 = normalized_result_0 else let e = err_of(normalized_result_0) { return err(e); }
-        if written > 0 { out.write_byte(44); }
-        out.write(b"\"id\":");
-        out.write(normalized_0);
-        written = written + 1;
+fn graphql_resolver_arg_Query_user_id(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[str, str] {
+    let found = __graphql.find_argument(doc, selection, "id");
+    let raw = b"";
+    if let _ = found {
+        guard let argument = found else { return err("graphql validation: argument lookup failed"); }
+        let variable_type = __graphql.validate_variable_type(doc, operation, argument.value, "ID!", false);
+        guard let _type_ok = variable_type else let e = err_of(variable_type) { return err(e); }
+        if __graphql.variable_missing(doc, argument.value, variables, operation) {
+            return err("graphql validation: required variable for argument id is missing");
+        } else {
+            let value_result = __graphql.value_json(doc, argument.value, variables, operation, limits);
+            guard let value = value_result else let e = err_of(value_result) { return err(e); }
+            raw = value;
+        }
+    } else {
+        return err("graphql validation: required argument id is missing");
     }
-    out.write_byte(125);
-    let typed_result: result[Query_user_Args, str] = json.decode(out.finish());
+    let normalized_result = graphql_normalize_arg_Query_user_id_0(raw, limits, 0);
+    guard let normalized = normalized_result else let e = err_of(normalized_result) { return err(e); }
+    let typed_result: result[str, str] = json.decode(normalized);
     return typed_result;
+}
+
+fn graphql_resolver_args_Query_user(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Query_user_Args, str] {
+    for i in 0..len(selection.arguments) {
+        let actual = __graphql.span_text(doc.source, selection.arguments[i].name);
+        if actual == "id" { continue; }
+        return err("graphql validation: unknown argument " + actual);
+    }
+    let arg_result_0 = graphql_resolver_arg_Query_user_id(doc, selection, variables, operation, limits);
+    guard let arg_0 = arg_result_0 else let e = err_of(arg_result_0) { return err(e); }
+    return ok(Query_user_Args {
+        id: arg_0
+    });
 }
 
 fn graphql_normalize_arg_Query_integer_value_0(raw: bytes, limits: __graphql.Limits, depth: int) -> result[bytes, str] {
@@ -376,28 +513,40 @@ fn graphql_normalize_arg_Query_integer_value_0(raw: bytes, limits: __graphql.Lim
     return __graphql.normalize_int32(raw);
 }
 
-fn graphql_resolver_args_Query_integer(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Query_integer_Args, str] {
-    let args_json_result = __graphql.arguments_json(doc, selection, variables, operation, limits, [__graphql.ArgSpec { name: "value", type_ref: "Int!", required: true, has_default: false, default_json: b"" }]);
-    guard let args_json = args_json_result else let e = err_of(args_json_result) { return err(e); }
-    let fields_result = __graphql.parse_input_object(args_json, limits);
-    guard let fields = fields_result else let e = err_of(fields_result) { return err(e); }
-    let known_result = __graphql.validate_object_keys(fields, ["value"]);
-    guard let _known = known_result else let e = err_of(known_result) { return err(e); }
-    let out = builder.new_bytes();
-    out.write_byte(123);
-    let written = 0;
-    let value_result_0 = __graphql.variables_get(fields, "value");
-    if let raw_value_0 = value_result_0 {
-        let normalized_result_0 = graphql_normalize_arg_Query_integer_value_0(raw_value_0, limits, 0);
-        guard let normalized_0 = normalized_result_0 else let e = err_of(normalized_result_0) { return err(e); }
-        if written > 0 { out.write_byte(44); }
-        out.write(b"\"value\":");
-        out.write(normalized_0);
-        written = written + 1;
+fn graphql_resolver_arg_Query_integer_value(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[int, str] {
+    let found = __graphql.find_argument(doc, selection, "value");
+    let raw = b"";
+    if let _ = found {
+        guard let argument = found else { return err("graphql validation: argument lookup failed"); }
+        let variable_type = __graphql.validate_variable_type(doc, operation, argument.value, "Int!", false);
+        guard let _type_ok = variable_type else let e = err_of(variable_type) { return err(e); }
+        if __graphql.variable_missing(doc, argument.value, variables, operation) {
+            return err("graphql validation: required variable for argument value is missing");
+        } else {
+            let value_result = __graphql.value_json(doc, argument.value, variables, operation, limits);
+            guard let value = value_result else let e = err_of(value_result) { return err(e); }
+            raw = value;
+        }
+    } else {
+        return err("graphql validation: required argument value is missing");
     }
-    out.write_byte(125);
-    let typed_result: result[Query_integer_Args, str] = json.decode(out.finish());
+    let normalized_result = graphql_normalize_arg_Query_integer_value_0(raw, limits, 0);
+    guard let normalized = normalized_result else let e = err_of(normalized_result) { return err(e); }
+    let typed_result: result[int, str] = json.decode(normalized);
     return typed_result;
+}
+
+fn graphql_resolver_args_Query_integer(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Query_integer_Args, str] {
+    for i in 0..len(selection.arguments) {
+        let actual = __graphql.span_text(doc.source, selection.arguments[i].name);
+        if actual == "value" { continue; }
+        return err("graphql validation: unknown argument " + actual);
+    }
+    let arg_result_0 = graphql_resolver_arg_Query_integer_value(doc, selection, variables, operation, limits);
+    guard let arg_0 = arg_result_0 else let e = err_of(arg_result_0) { return err(e); }
+    return ok(Query_integer_Args {
+        value: arg_0
+    });
 }
 
 fn graphql_normalize_arg_Mutation_rename_id_0(raw: bytes, limits: __graphql.Limits, depth: int) -> result[bytes, str] {
@@ -412,43 +561,74 @@ fn graphql_normalize_arg_Mutation_rename_name_0(raw: bytes, limits: __graphql.Li
     return ok(raw);
 }
 
-fn graphql_resolver_args_Mutation_rename(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Mutation_rename_Args, str] {
-    let args_json_result = __graphql.arguments_json(doc, selection, variables, operation, limits, [__graphql.ArgSpec { name: "id", type_ref: "ID!", required: true, has_default: false, default_json: b"" }, __graphql.ArgSpec { name: "name", type_ref: "String!", required: true, has_default: false, default_json: b"" }]);
-    guard let args_json = args_json_result else let e = err_of(args_json_result) { return err(e); }
-    let fields_result = __graphql.parse_input_object(args_json, limits);
-    guard let fields = fields_result else let e = err_of(fields_result) { return err(e); }
-    let known_result = __graphql.validate_object_keys(fields, ["id", "name"]);
-    guard let _known = known_result else let e = err_of(known_result) { return err(e); }
-    let out = builder.new_bytes();
-    out.write_byte(123);
-    let written = 0;
-    let value_result_0 = __graphql.variables_get(fields, "id");
-    if let raw_value_0 = value_result_0 {
-        let normalized_result_0 = graphql_normalize_arg_Mutation_rename_id_0(raw_value_0, limits, 0);
-        guard let normalized_0 = normalized_result_0 else let e = err_of(normalized_result_0) { return err(e); }
-        if written > 0 { out.write_byte(44); }
-        out.write(b"\"id\":");
-        out.write(normalized_0);
-        written = written + 1;
+fn graphql_resolver_arg_Mutation_rename_id(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[str, str] {
+    let found = __graphql.find_argument(doc, selection, "id");
+    let raw = b"";
+    if let _ = found {
+        guard let argument = found else { return err("graphql validation: argument lookup failed"); }
+        let variable_type = __graphql.validate_variable_type(doc, operation, argument.value, "ID!", false);
+        guard let _type_ok = variable_type else let e = err_of(variable_type) { return err(e); }
+        if __graphql.variable_missing(doc, argument.value, variables, operation) {
+            return err("graphql validation: required variable for argument id is missing");
+        } else {
+            let value_result = __graphql.value_json(doc, argument.value, variables, operation, limits);
+            guard let value = value_result else let e = err_of(value_result) { return err(e); }
+            raw = value;
+        }
+    } else {
+        return err("graphql validation: required argument id is missing");
     }
-    let value_result_1 = __graphql.variables_get(fields, "name");
-    if let raw_value_1 = value_result_1 {
-        let normalized_result_1 = graphql_normalize_arg_Mutation_rename_name_0(raw_value_1, limits, 0);
-        guard let normalized_1 = normalized_result_1 else let e = err_of(normalized_result_1) { return err(e); }
-        if written > 0 { out.write_byte(44); }
-        out.write(b"\"name\":");
-        out.write(normalized_1);
-        written = written + 1;
-    }
-    out.write_byte(125);
-    let typed_result: result[Mutation_rename_Args, str] = json.decode(out.finish());
+    let normalized_result = graphql_normalize_arg_Mutation_rename_id_0(raw, limits, 0);
+    guard let normalized = normalized_result else let e = err_of(normalized_result) { return err(e); }
+    let typed_result: result[str, str] = json.decode(normalized);
     return typed_result;
 }
 
-fn graphql_validate_Query(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {
+fn graphql_resolver_arg_Mutation_rename_name(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[str, str] {
+    let found = __graphql.find_argument(doc, selection, "name");
+    let raw = b"";
+    if let _ = found {
+        guard let argument = found else { return err("graphql validation: argument lookup failed"); }
+        let variable_type = __graphql.validate_variable_type(doc, operation, argument.value, "String!", false);
+        guard let _type_ok = variable_type else let e = err_of(variable_type) { return err(e); }
+        if __graphql.variable_missing(doc, argument.value, variables, operation) {
+            return err("graphql validation: required variable for argument name is missing");
+        } else {
+            let value_result = __graphql.value_json(doc, argument.value, variables, operation, limits);
+            guard let value = value_result else let e = err_of(value_result) { return err(e); }
+            raw = value;
+        }
+    } else {
+        return err("graphql validation: required argument name is missing");
+    }
+    let normalized_result = graphql_normalize_arg_Mutation_rename_name_0(raw, limits, 0);
+    guard let normalized = normalized_result else let e = err_of(normalized_result) { return err(e); }
+    let typed_result: result[str, str] = json.decode(normalized);
+    return typed_result;
+}
+
+fn graphql_resolver_args_Mutation_rename(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[Mutation_rename_Args, str] {
+    for i in 0..len(selection.arguments) {
+        let actual = __graphql.span_text(doc.source, selection.arguments[i].name);
+        if actual == "id" { continue; }
+        if actual == "name" { continue; }
+        return err("graphql validation: unknown argument " + actual);
+    }
+    let arg_result_0 = graphql_resolver_arg_Mutation_rename_id(doc, selection, variables, operation, limits);
+    guard let arg_0 = arg_result_0 else let e = err_of(arg_result_0) { return err(e); }
+    let arg_result_1 = graphql_resolver_arg_Mutation_rename_name(doc, selection, variables, operation, limits);
+    guard let arg_1 = arg_result_1 else let e = err_of(arg_result_1) { return err(e); }
+    return ok(Mutation_rename_Args {
+        id: arg_0,
+        name: arg_1
+    });
+}
+
+fn graphql_validate_Query(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {
     if depth > limits.max_depth { return err("graphql validation: selection depth exceeds configured limit"); }
     let expanded_result = __graphql.collect_selections_budget(doc, incoming, "Query", variables, operation, limits, budget);
     guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }
+    push(args_plan.expansions, graphql_ExpansionEntry { type_id: 0, incoming: incoming, expanded: selections });
     let response_names: map[str]bool = {};
     for i in 0..len(selections) {
         let selection = selections[i];
@@ -462,21 +642,24 @@ fn graphql_validate_Query(incoming: [__graphql.Selection], doc: __graphql.Docume
         }
         if field_name == "hello" {
             let typed_args_result = graphql_resolver_args_Query_hello(doc, selection, variables, operation, limits);
-            guard let _typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            guard let typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            push(args_plan.args_Query_hello, graphql_ArgsEntry_Query_hello { selection: selection, args: typed_args });
             if len(selection.children) != 0 { return err("graphql validation: scalar field cannot have a selection set"); }
             continue;
         }
         if field_name == "user" {
             let typed_args_result = graphql_resolver_args_Query_user(doc, selection, variables, operation, limits);
-            guard let _typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            guard let typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            push(args_plan.args_Query_user, graphql_ArgsEntry_Query_user { selection: selection, args: typed_args });
             if len(selection.children) == 0 { return err("graphql validation: object field requires a selection set"); }
-            let nested = graphql_validate_User(selection.children, doc, variables, operation, context, limits, budget, depth + 1);
+            let nested = graphql_validate_User(selection.children, doc, variables, operation, context, limits, args_plan, budget, depth + 1);
             guard let _nested_ok = nested else let e = err_of(nested) { return err(e); }
             continue;
         }
         if field_name == "integer" {
             let typed_args_result = graphql_resolver_args_Query_integer(doc, selection, variables, operation, limits);
-            guard let _typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            guard let typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            push(args_plan.args_Query_integer, graphql_ArgsEntry_Query_integer { selection: selection, args: typed_args });
             if len(selection.children) != 0 { return err("graphql validation: scalar field cannot have a selection set"); }
             continue;
         }
@@ -497,10 +680,12 @@ fn graphql_validate_Query(incoming: [__graphql.Selection], doc: __graphql.Docume
     return ok(true);
 }
 
-fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if depth > limits.max_depth { return err("graphql execution: selection depth exceeds configured limit"); }
-    let expanded_result = __graphql.collect_selections_budget(doc, incoming, "Query", variables, operation, limits, budget);
-    guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }
+    let expansion_index = graphql_expansion_index(args_plan, 0, incoming);
+    if expansion_index < 0 { return err("graphql execution: validated selection expansion is missing"); }
+    let selections = args_plan.expansions[expansion_index].expanded;
+    if !__graphql.charge_expanded_selection_budget(selections, budget) { return err("graphql validation: expanded selection count exceeds configured limit"); }
     let out = builder.new_bytes();
     out.write_byte(123);
     let written = 0;
@@ -520,15 +705,16 @@ fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], d
             continue;
         }
         if field_name == "hello" {
-            let args_result = graphql_resolver_args_Query_hello(doc, selection, variables, operation, limits);
-            guard let args = args_result else let e = err_of(args_result) { return err("graphql execution: arguments changed after validation: " + e); }
+            let args_index = graphql_args_index_Query_hello(args_plan, selection);
+            if args_index < 0 { return err("graphql execution: validated arguments are missing"); }
+            let args = args_plan.args_Query_hello[args_index].args;
             let resolved_result = graphql_call_Query_hello(parent, args, context);
             guard let resolved = resolved_result else let _resolver_error = err_of(resolved_result) {
                 let added = __graphql.error_add(errors, "resolver failed");
                 guard let _added = added else let e = err_of(added) { return err(e); }
                 return err("graphql_nonnull_bubble");
             }
-            let encoded_result = graphql_encode_Query_hello_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_Query_hello_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -542,8 +728,9 @@ fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], d
             continue;
         }
         if field_name == "user" {
-            let args_result = graphql_resolver_args_Query_user(doc, selection, variables, operation, limits);
-            guard let args = args_result else let e = err_of(args_result) { return err("graphql execution: arguments changed after validation: " + e); }
+            let args_index = graphql_args_index_Query_user(args_plan, selection);
+            if args_index < 0 { return err("graphql execution: validated arguments are missing"); }
+            let args = args_plan.args_Query_user[args_index].args;
             let resolved_result = graphql_call_Query_user(parent, args, context);
             guard let resolved = resolved_result else let _resolver_error = err_of(resolved_result) {
                 let added = __graphql.error_add(errors, "resolver failed");
@@ -553,7 +740,7 @@ fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], d
                 written = written + 1;
                 continue;
             }
-            let encoded_result = graphql_encode_Query_user_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_Query_user_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -570,15 +757,16 @@ fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], d
             continue;
         }
         if field_name == "integer" {
-            let args_result = graphql_resolver_args_Query_integer(doc, selection, variables, operation, limits);
-            guard let args = args_result else let e = err_of(args_result) { return err("graphql execution: arguments changed after validation: " + e); }
+            let args_index = graphql_args_index_Query_integer(args_plan, selection);
+            if args_index < 0 { return err("graphql execution: validated arguments are missing"); }
+            let args = args_plan.args_Query_integer[args_index].args;
             let resolved_result = graphql_call_Query_integer(parent, args, context);
             guard let resolved = resolved_result else let _resolver_error = err_of(resolved_result) {
                 let added = __graphql.error_add(errors, "resolver failed");
                 guard let _added = added else let e = err_of(added) { return err(e); }
                 return err("graphql_nonnull_bubble");
             }
-            let encoded_result = graphql_encode_Query_integer_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_Query_integer_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -599,7 +787,7 @@ fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], d
                 guard let _added = added else let e = err_of(added) { return err(e); }
                 return err("graphql_nonnull_bubble");
             }
-            let encoded_result = graphql_encode_Query_over_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_Query_over_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -623,7 +811,7 @@ fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], d
                 written = written + 1;
                 continue;
             }
-            let encoded_result = graphql_encode_Query_strictOver_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_Query_strictOver_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -646,7 +834,7 @@ fn graphql_emit_Query(parent: __graphql.Root, incoming: [__graphql.Selection], d
     return ok(out.finish());
 }
 
-fn graphql_encode_Query_hello_0(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_Query_hello_0(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if len(value) > limits.max_response_bytes { return err("graphql response string exceeds configured byte limit"); }
     let out = builder.new_bytes();
     let written = __graphql.write_json_string_bounded(out, value, limits.max_response_bytes);
@@ -655,9 +843,9 @@ fn graphql_encode_Query_hello_0(value: str, selection: __graphql.Selection, doc:
     return ok(out.finish());
 }
 
-fn graphql_encode_Query_user_0(value: opt[User], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_Query_user_0(value: opt[User], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     guard let unwrapped_0 = value else { return ok(b"null"); }
-    let encoded_result = graphql_emit_User(unwrapped_0, selection.children, doc, variables, operation, context, errors, limits, budget, depth + 1);
+    let encoded_result = graphql_emit_User(unwrapped_0, selection.children, doc, variables, operation, context, errors, limits, args_plan, budget, depth + 1);
     guard let encoded = encoded_result else let e = err_of(encoded_result) {
         if e != "graphql_nonnull_bubble" {
             let added = __graphql.error_add(errors, "result could not be encoded");
@@ -668,19 +856,19 @@ fn graphql_encode_Query_user_0(value: opt[User], selection: __graphql.Selection,
     return ok(encoded);
 }
 
-fn graphql_encode_Query_integer_0(value: int, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_Query_integer_0(value: int, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if value < -2147483648 || value > 2147483647 { return err("graphql Int result is outside the signed 32-bit range"); }
     let encoded = json.encode(value);
     return ok(to_bytes(encoded));
 }
 
-fn graphql_encode_Query_over_0(value: [opt[str]], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_Query_over_0(value: [opt[str]], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if len(value) > limits.max_breadth { return err("graphql response list exceeds configured breadth"); }
     let out_0 = builder.new_bytes();
     out_0.write_byte(91);
     for index_0 in 0..len(value) {
         if index_0 > 0 { out_0.write_byte(44); }
-        let item_result_0 = graphql_encode_Query_over_1(value[index_0], selection, doc, variables, operation, context, errors, limits, budget, depth);
+        let item_result_0 = graphql_encode_Query_over_1(value[index_0], selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
         guard let item_0 = item_result_0 else let e = err_of(item_result_0) {
             if e != "graphql_nonnull_bubble" {
                 let added = __graphql.error_add(errors, "result could not be encoded");
@@ -698,7 +886,7 @@ fn graphql_encode_Query_over_0(value: [opt[str]], selection: __graphql.Selection
     return ok(out_0.finish());
 }
 
-fn graphql_encode_Query_over_1(value: opt[str], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_Query_over_1(value: opt[str], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     guard let unwrapped_1 = value else { return ok(b"null"); }
     if len(unwrapped_1) > limits.max_response_bytes { return err("graphql response string exceeds configured byte limit"); }
     let out = builder.new_bytes();
@@ -708,14 +896,14 @@ fn graphql_encode_Query_over_1(value: opt[str], selection: __graphql.Selection, 
     return ok(out.finish());
 }
 
-fn graphql_encode_Query_strictOver_0(value: opt[[str]], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_Query_strictOver_0(value: opt[[str]], selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     guard let unwrapped_0 = value else { return ok(b"null"); }
     if len(unwrapped_0) > limits.max_breadth { return err("graphql response list exceeds configured breadth"); }
     let out_0 = builder.new_bytes();
     out_0.write_byte(91);
     for index_0 in 0..len(unwrapped_0) {
         if index_0 > 0 { out_0.write_byte(44); }
-        let item_result_0 = graphql_encode_Query_strictOver_1(unwrapped_0[index_0], selection, doc, variables, operation, context, errors, limits, budget, depth);
+        let item_result_0 = graphql_encode_Query_strictOver_1(unwrapped_0[index_0], selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
         guard let item_0 = item_result_0 else let e = err_of(item_result_0) {
             if e != "graphql_nonnull_bubble" {
                 let added = __graphql.error_add(errors, "result could not be encoded");
@@ -731,7 +919,7 @@ fn graphql_encode_Query_strictOver_0(value: opt[[str]], selection: __graphql.Sel
     return ok(out_0.finish());
 }
 
-fn graphql_encode_Query_strictOver_1(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_Query_strictOver_1(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if len(value) > limits.max_response_bytes { return err("graphql response string exceeds configured byte limit"); }
     let out = builder.new_bytes();
     let written = __graphql.write_json_string_bounded(out, value, limits.max_response_bytes);
@@ -740,10 +928,11 @@ fn graphql_encode_Query_strictOver_1(value: str, selection: __graphql.Selection,
     return ok(out.finish());
 }
 
-fn graphql_validate_User(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {
+fn graphql_validate_User(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {
     if depth > limits.max_depth { return err("graphql validation: selection depth exceeds configured limit"); }
     let expanded_result = __graphql.collect_selections_budget(doc, incoming, "User", variables, operation, limits, budget);
     guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }
+    push(args_plan.expansions, graphql_ExpansionEntry { type_id: 1, incoming: incoming, expanded: selections });
     let response_names: map[str]bool = {};
     for i in 0..len(selections) {
         let selection = selections[i];
@@ -778,10 +967,12 @@ fn graphql_validate_User(incoming: [__graphql.Selection], doc: __graphql.Documen
     return ok(true);
 }
 
-fn graphql_emit_User(parent: User, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_emit_User(parent: User, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if depth > limits.max_depth { return err("graphql execution: selection depth exceeds configured limit"); }
-    let expanded_result = __graphql.collect_selections_budget(doc, incoming, "User", variables, operation, limits, budget);
-    guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }
+    let expansion_index = graphql_expansion_index(args_plan, 1, incoming);
+    if expansion_index < 0 { return err("graphql execution: validated selection expansion is missing"); }
+    let selections = args_plan.expansions[expansion_index].expanded;
+    if !__graphql.charge_expanded_selection_budget(selections, budget) { return err("graphql validation: expanded selection count exceeds configured limit"); }
     let out = builder.new_bytes();
     out.write_byte(123);
     let written = 0;
@@ -808,7 +999,7 @@ fn graphql_emit_User(parent: User, incoming: [__graphql.Selection], doc: __graph
                 guard let _added = added else let e = err_of(added) { return err(e); }
                 return err("graphql_nonnull_bubble");
             }
-            let encoded_result = graphql_encode_User_id_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_User_id_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -829,7 +1020,7 @@ fn graphql_emit_User(parent: User, incoming: [__graphql.Selection], doc: __graph
                 guard let _added = added else let e = err_of(added) { return err(e); }
                 return err("graphql_nonnull_bubble");
             }
-            let encoded_result = graphql_encode_User_name_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_User_name_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -850,7 +1041,7 @@ fn graphql_emit_User(parent: User, incoming: [__graphql.Selection], doc: __graph
                 guard let _added = added else let e = err_of(added) { return err(e); }
                 return err("graphql_nonnull_bubble");
             }
-            let encoded_result = graphql_encode_User_role_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_User_role_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -870,7 +1061,7 @@ fn graphql_emit_User(parent: User, incoming: [__graphql.Selection], doc: __graph
     return ok(out.finish());
 }
 
-fn graphql_encode_User_id_0(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_User_id_0(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if len(value) > limits.max_response_bytes { return err("graphql response string exceeds configured byte limit"); }
     let out = builder.new_bytes();
     let written = __graphql.write_json_string_bounded(out, value, limits.max_response_bytes);
@@ -879,7 +1070,7 @@ fn graphql_encode_User_id_0(value: str, selection: __graphql.Selection, doc: __g
     return ok(out.finish());
 }
 
-fn graphql_encode_User_name_0(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_User_name_0(value: str, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if len(value) > limits.max_response_bytes { return err("graphql response string exceeds configured byte limit"); }
     let out = builder.new_bytes();
     let written = __graphql.write_json_string_bounded(out, value, limits.max_response_bytes);
@@ -888,15 +1079,16 @@ fn graphql_encode_User_name_0(value: str, selection: __graphql.Selection, doc: _
     return ok(out.finish());
 }
 
-fn graphql_encode_User_role_0(value: Role, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_encode_User_role_0(value: Role, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     let encoded = json.encode(value);
     return ok(to_bytes(encoded));
 }
 
-fn graphql_validate_Mutation(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {
+fn graphql_validate_Mutation(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {
     if depth > limits.max_depth { return err("graphql validation: selection depth exceeds configured limit"); }
     let expanded_result = __graphql.collect_selections_budget(doc, incoming, "Mutation", variables, operation, limits, budget);
     guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }
+    push(args_plan.expansions, graphql_ExpansionEntry { type_id: 2, incoming: incoming, expanded: selections });
     let response_names: map[str]bool = {};
     for i in 0..len(selections) {
         let selection = selections[i];
@@ -910,9 +1102,10 @@ fn graphql_validate_Mutation(incoming: [__graphql.Selection], doc: __graphql.Doc
         }
         if field_name == "rename" {
             let typed_args_result = graphql_resolver_args_Mutation_rename(doc, selection, variables, operation, limits);
-            guard let _typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            guard let typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }
+            push(args_plan.args_Mutation_rename, graphql_ArgsEntry_Mutation_rename { selection: selection, args: typed_args });
             if len(selection.children) == 0 { return err("graphql validation: object field requires a selection set"); }
-            let nested = graphql_validate_User(selection.children, doc, variables, operation, context, limits, budget, depth + 1);
+            let nested = graphql_validate_User(selection.children, doc, variables, operation, context, limits, args_plan, budget, depth + 1);
             guard let _nested_ok = nested else let e = err_of(nested) { return err(e); }
             continue;
         }
@@ -921,10 +1114,12 @@ fn graphql_validate_Mutation(incoming: [__graphql.Selection], doc: __graphql.Doc
     return ok(true);
 }
 
-fn graphql_emit_Mutation(parent: __graphql.Root, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+fn graphql_emit_Mutation(parent: __graphql.Root, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
     if depth > limits.max_depth { return err("graphql execution: selection depth exceeds configured limit"); }
-    let expanded_result = __graphql.collect_selections_budget(doc, incoming, "Mutation", variables, operation, limits, budget);
-    guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }
+    let expansion_index = graphql_expansion_index(args_plan, 2, incoming);
+    if expansion_index < 0 { return err("graphql execution: validated selection expansion is missing"); }
+    let selections = args_plan.expansions[expansion_index].expanded;
+    if !__graphql.charge_expanded_selection_budget(selections, budget) { return err("graphql validation: expanded selection count exceeds configured limit"); }
     let out = builder.new_bytes();
     out.write_byte(123);
     let written = 0;
@@ -944,15 +1139,16 @@ fn graphql_emit_Mutation(parent: __graphql.Root, incoming: [__graphql.Selection]
             continue;
         }
         if field_name == "rename" {
-            let args_result = graphql_resolver_args_Mutation_rename(doc, selection, variables, operation, limits);
-            guard let args = args_result else let e = err_of(args_result) { return err("graphql execution: arguments changed after validation: " + e); }
+            let args_index = graphql_args_index_Mutation_rename(args_plan, selection);
+            if args_index < 0 { return err("graphql execution: validated arguments are missing"); }
+            let args = args_plan.args_Mutation_rename[args_index].args;
             let resolved_result = graphql_call_Mutation_rename(parent, args, context);
             guard let resolved = resolved_result else let _resolver_error = err_of(resolved_result) {
                 let added = __graphql.error_add(errors, "resolver failed");
                 guard let _added = added else let e = err_of(added) { return err(e); }
                 return err("graphql_nonnull_bubble");
             }
-            let encoded_result = graphql_encode_Mutation_rename_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);
+            let encoded_result = graphql_encode_Mutation_rename_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);
             guard let encoded = encoded_result else let e = err_of(encoded_result) {
                 if e != "graphql_nonnull_bubble" {
                     let added = __graphql.error_add(errors, "result could not be encoded");
@@ -972,8 +1168,8 @@ fn graphql_emit_Mutation(parent: __graphql.Root, incoming: [__graphql.Selection]
     return ok(out.finish());
 }
 
-fn graphql_encode_Mutation_rename_0(value: User, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
-    let encoded_result = graphql_emit_User(value, selection.children, doc, variables, operation, context, errors, limits, budget, depth + 1);
+fn graphql_encode_Mutation_rename_0(value: User, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: graphql.Context, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {
+    let encoded_result = graphql_emit_User(value, selection.children, doc, variables, operation, context, errors, limits, args_plan, budget, depth + 1);
     guard let encoded = encoded_result else let e = err_of(encoded_result) {
         if e != "graphql_nonnull_bubble" {
             let added = __graphql.error_add(errors, "result could not be encoded");

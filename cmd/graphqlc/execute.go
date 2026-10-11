@@ -8,27 +8,87 @@ import (
 
 func generateExecution(s *schema, contextType string) (string, error) {
 	var b strings.Builder
-	b.WriteString("// Parse, validate, dispatch and serialize one request-local operation.\n")
-	fmt.Fprintf(&b, "pub fn graphql_execute(query: str, operation_name: str, variables_json: bytes, context: %s, limits: __graphql.Limits) -> result[bytes, str] {\n", contextType)
+	argFields := executionArgsFields(s)
+	b.WriteString("// Reuse validated selections and typed arguments during execution.\n")
+	b.WriteString("gc struct graphql_ExpansionEntry { type_id: int, incoming: [__graphql.Selection], expanded: [__graphql.Selection] }\n")
+	for _, field := range argFields {
+		fmt.Fprintf(&b, "gc struct %s { selection: __graphql.Selection, args: %s }\n",
+			argsPlanEntryType(field), argsTypeName(field.object, field.field))
+	}
+	b.WriteString("\ngc struct graphql_ExecutionPlan {\n    expansions: [graphql_ExpansionEntry]")
+	if len(argFields) > 0 {
+		b.WriteString(",\n")
+		for i, field := range argFields {
+			comma := ","
+			if i == len(argFields)-1 {
+				comma = ""
+			}
+			fmt.Fprintf(&b, "    %s: [%s]%s\n", argsPlanField(field), argsPlanEntryType(field), comma)
+		}
+	} else {
+		b.WriteByte('\n')
+	}
+	b.WriteString("}\n\n")
+	b.WriteString("fn graphql_same_selection_list(a: [__graphql.Selection], b: [__graphql.Selection]) -> bool {\n")
+	b.WriteString("    if len(a) != len(b) { return false; }\n    for i in 0..len(a) {\n        let left = a[i];\n        let right = b[i];\n")
+	b.WriteString("        if left.kind != right.kind || left.name.start != right.name.start || left.name.end != right.name.end || left.alias.start != right.alias.start || left.alias.end != right.alias.end || left.type_condition.start != right.type_condition.start || left.type_condition.end != right.type_condition.end { return false; }\n    }\n    return true;\n}\n\n")
+	b.WriteString("fn graphql_expansion_index(plan: graphql_ExecutionPlan, type_id: int, incoming: [__graphql.Selection]) -> int {\n    for i in 0..len(plan.expansions) {\n        let entry = plan.expansions[i];\n        if entry.type_id == type_id && graphql_same_selection_list(entry.incoming, incoming) { return i; }\n    }\n    return -1;\n}\n\n")
+	for _, field := range argFields {
+		fmt.Fprintf(&b, "fn graphql_args_index_%s_%s(plan: graphql_ExecutionPlan, selection: __graphql.Selection) -> int {\n", field.object, field.field)
+		fmt.Fprintf(&b, "    for i in 0..len(plan.%s) {\n", argsPlanField(field))
+		fmt.Fprintf(&b, "        let planned = plan.%s[i].selection;\n", argsPlanField(field))
+		b.WriteString("        if planned.name.start == selection.name.start && planned.name.end == selection.name.end && planned.alias.start == selection.alias.start && planned.alias.end == selection.alias.end { return i; }\n")
+		b.WriteString("    }\n    return -1;\n}\n\n")
+	}
+	b.WriteString("// A caller-owned parsed operation. Keep one handle per persisted operation.\n")
+	b.WriteString("pub gc struct graphql_PreparedQuery { document: __graphql.Document, operation: __graphql.Operation, limits: __graphql.Limits }\n")
+	b.WriteString("struct graphql_ParsedQuery { document: __graphql.Document, operation: __graphql.Operation }\n\n")
+	b.WriteString("fn graphql_parse_query(query: str, operation_name: str, limits: __graphql.Limits) -> result[graphql_ParsedQuery, str] {\n")
 	b.WriteString("    let parsed_result = __graphql.parse(query, limits);\n")
-	b.WriteString("    guard let doc = parsed_result else let e = err_of(parsed_result) { return __graphql.failure(e, limits); }\n")
+	b.WriteString("    guard let doc = parsed_result else let e = err_of(parsed_result) { return err(e); }\n")
 	b.WriteString("    let condition_result = __graphql.type_conditions(doc, limits);\n")
-	b.WriteString("    guard let conditions = condition_result else let e = err_of(condition_result) { return __graphql.failure(e, limits); }\n")
+	b.WriteString("    guard let conditions = condition_result else let e = err_of(condition_result) { return err(e); }\n")
 	b.WriteString("    for i in 0..len(conditions) {\n")
-	b.WriteString("        if !graphql_schema_has_object_type(conditions[i]) { return __graphql.failure(\"graphql validation: unknown object type \" + conditions[i], limits); }\n")
+	b.WriteString("        if !graphql_schema_has_object_type(conditions[i]) { return err(\"graphql validation: unknown object type \" + conditions[i]); }\n")
 	b.WriteString("    }\n")
 	b.WriteString("    let operation_result = __graphql.validate_document(doc, operation_name);\n")
-	b.WriteString("    guard let operation = operation_result else let e = err_of(operation_result) { return __graphql.failure(e, limits); }\n")
+	b.WriteString("    guard let operation = operation_result else let e = err_of(operation_result) { return err(e); }\n")
+	b.WriteString("    return ok(graphql_ParsedQuery { document: doc, operation: operation });\n}\n\n")
+	b.WriteString("pub fn graphql_prepare(query: str, operation_name: str, limits: __graphql.Limits) -> result[graphql_PreparedQuery, str] {\n")
+	b.WriteString("    let parsed_result = graphql_parse_query(query, operation_name, limits);\n")
+	b.WriteString("    guard let parsed = parsed_result else let e = err_of(parsed_result) { return err(e); }\n")
+	b.WriteString("    return ok(graphql_PreparedQuery { document: parsed.document, operation: parsed.operation, limits: limits });\n}\n\n")
+	fmt.Fprintf(&b, "pub fn graphql_execute(query: str, operation_name: str, variables_json: bytes, context: %s, limits: __graphql.Limits) -> result[bytes, str] {\n", contextType)
+	b.WriteString("    let parsed_result = graphql_parse_query(query, operation_name, limits);\n")
+	b.WriteString("    guard let parsed = parsed_result else let e = err_of(parsed_result) { return __graphql.failure(e, limits); }\n")
+	b.WriteString("    return graphql_execute_document(parsed.document, parsed.operation, variables_json, context, limits);\n}\n\n")
+	fmt.Fprintf(&b, "pub fn graphql_execute_prepared(prepared: graphql_PreparedQuery, variables_json: bytes, context: %s) -> result[bytes, str] {\n", contextType)
+	b.WriteString("    return graphql_execute_document(prepared.document, prepared.operation, variables_json, context, prepared.limits);\n}\n\n")
+	fmt.Fprintf(&b, "fn graphql_execute_document(doc: __graphql.Document, operation: __graphql.Operation, variables_json: bytes, context: %s, limits: __graphql.Limits) -> result[bytes, str] {\n", contextType)
 	b.WriteString("    let variables_result = __graphql.parse_variables(variables_json, limits);\n")
 	b.WriteString("    guard let variables = variables_result else let e = err_of(variables_result) { return __graphql.failure(e, limits); }\n")
 	b.WriteString("    let errors_result = __graphql.errors_new(100);\n")
 	b.WriteString("    guard let errors = errors_result else let e = err_of(errors_result) { return err(e); }\n")
+	b.WriteString("    let args_plan = graphql_ExecutionPlan {\n        expansions: []")
+	if len(argFields) > 0 {
+		b.WriteString(",\n")
+		for i, field := range argFields {
+			comma := ","
+			if i == len(argFields)-1 {
+				comma = ""
+			}
+			fmt.Fprintf(&b, "        %s: []%s\n", argsPlanField(field), comma)
+		}
+	} else {
+		b.WriteByte('\n')
+	}
+	b.WriteString("    };\n")
 	b.WriteString("    if operation.kind == __graphql.OP_QUERY {\n")
 	b.WriteString("        let validation_budget = __graphql.expansion_budget(limits);\n")
-	fmt.Fprintf(&b, "        let checked = graphql_validate_%s(operation.selections, doc, variables, operation, context, limits, validation_budget, 0);\n", s.queryRoot)
+	fmt.Fprintf(&b, "        let checked = graphql_validate_%s(operation.selections, doc, variables, operation, context, limits, args_plan, validation_budget, 0);\n", s.queryRoot)
 	b.WriteString("        guard let _valid = checked else let e = err_of(checked) { return __graphql.failure(e, limits); }\n")
 	b.WriteString("        let execution_budget = __graphql.expansion_budget(limits);\n")
-	fmt.Fprintf(&b, "        let execution = graphql_emit_%s(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, execution_budget, 0);\n", s.queryRoot)
+	fmt.Fprintf(&b, "        let execution = graphql_emit_%s(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, args_plan, execution_budget, 0);\n", s.queryRoot)
 	b.WriteString("        let data = b\"null\";\n")
 	b.WriteString("        if let value = execution { data = value; } else let e = err_of(execution) {\n")
 	b.WriteString("            if e != \"graphql_nonnull_bubble\" {\n")
@@ -39,10 +99,10 @@ func generateExecution(s *schema, contextType string) (string, error) {
 	if s.mutRoot != "" {
 		b.WriteString("    if operation.kind == __graphql.OP_MUTATION {\n")
 		b.WriteString("        let validation_budget = __graphql.expansion_budget(limits);\n")
-		fmt.Fprintf(&b, "        let checked = graphql_validate_%s(operation.selections, doc, variables, operation, context, limits, validation_budget, 0);\n", s.mutRoot)
+		fmt.Fprintf(&b, "        let checked = graphql_validate_%s(operation.selections, doc, variables, operation, context, limits, args_plan, validation_budget, 0);\n", s.mutRoot)
 		b.WriteString("        guard let _valid = checked else let e = err_of(checked) { return __graphql.failure(e, limits); }\n")
 		b.WriteString("        let execution_budget = __graphql.expansion_budget(limits);\n")
-		fmt.Fprintf(&b, "        let execution = graphql_emit_%s(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, execution_budget, 0);\n", s.mutRoot)
+		fmt.Fprintf(&b, "        let execution = graphql_emit_%s(__graphql.root_new(), operation.selections, doc, variables, operation, context, errors, limits, args_plan, execution_budget, 0);\n", s.mutRoot)
 		b.WriteString("        let data = b\"null\";\n")
 		b.WriteString("        if let value = execution { data = value; } else let e = err_of(execution) {\n")
 		b.WriteString("            if e != \"graphql_nonnull_bubble\" {\n")
@@ -86,6 +146,11 @@ func generateExecution(s *schema, contextType string) (string, error) {
 				}
 			}
 			if len(f.args) > 0 {
+				for _, arg := range f.args {
+					if err := generateResolverArg(&b, s, d, f, arg); err != nil {
+						return "", err
+					}
+				}
 				generateResolverArgs(&b, d, f)
 			}
 		}
@@ -110,11 +175,54 @@ func generateExecution(s *schema, contextType string) (string, error) {
 	return b.String(), nil
 }
 
+type executionArgField struct {
+	object string
+	field  string
+}
+
+func executionArgsFields(s *schema) []executionArgField {
+	var fields []executionArgField
+	for _, d := range s.types {
+		if d.kind != "type" {
+			continue
+		}
+		for _, f := range d.fields {
+			if len(f.args) > 0 {
+				fields = append(fields, executionArgField{object: d.name, field: f.name})
+			}
+		}
+	}
+	return fields
+}
+
+func argsPlanField(field executionArgField) string {
+	return "args_" + field.object + "_" + field.field
+}
+
+func argsPlanEntryType(field executionArgField) string {
+	return "graphql_ArgsEntry_" + field.object + "_" + field.field
+}
+
+func executionObjectID(s *schema, name string) int {
+	id := 0
+	for _, d := range s.types {
+		if d.kind != "type" {
+			continue
+		}
+		if d.name == name {
+			return id
+		}
+		id++
+	}
+	return -1
+}
+
 func generateValidator(b *strings.Builder, s *schema, d typeDef, contextType string) error {
-	fmt.Fprintf(b, "fn graphql_validate_%s(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: %s, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {\n", d.name, contextType)
+	fmt.Fprintf(b, "fn graphql_validate_%s(incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: %s, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bool, str] {\n", d.name, contextType)
 	b.WriteString("    if depth > limits.max_depth { return err(\"graphql validation: selection depth exceeds configured limit\"); }\n")
 	fmt.Fprintf(b, "    let expanded_result = __graphql.collect_selections_budget(doc, incoming, %q, variables, operation, limits, budget);\n", d.name)
 	b.WriteString("    guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }\n")
+	fmt.Fprintf(b, "    push(args_plan.expansions, graphql_ExpansionEntry { type_id: %d, incoming: incoming, expanded: selections });\n", executionObjectID(s, d.name))
 	b.WriteString("    let response_names: map[str]bool = {};\n")
 	b.WriteString("    for i in 0..len(selections) {\n")
 	b.WriteString("        let selection = selections[i];\n")
@@ -129,7 +237,8 @@ func generateValidator(b *strings.Builder, s *schema, d typeDef, contextType str
 		fmt.Fprintf(b, "        if field_name == %q {\n", f.name)
 		if len(f.args) > 0 {
 			fmt.Fprintf(b, "            let typed_args_result = graphql_resolver_args_%s_%s(doc, selection, variables, operation, limits);\n", d.name, f.name)
-			b.WriteString("            guard let _typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }\n")
+			b.WriteString("            guard let typed_args = typed_args_result else let e = err_of(typed_args_result) { return err(e); }\n")
+			fmt.Fprintf(b, "            push(args_plan.%s, %s { selection: selection, args: typed_args });\n", argsPlanField(executionArgField{object: d.name, field: f.name}), argsPlanEntryType(executionArgField{object: d.name, field: f.name}))
 		} else {
 			b.WriteString("            let args_json_result = __graphql.arguments_json(doc, selection, variables, operation, limits, []);\n")
 			b.WriteString("            guard let _args_json = args_json_result else let e = err_of(args_json_result) { return err(e); }\n")
@@ -137,7 +246,7 @@ func generateValidator(b *strings.Builder, s *schema, d typeDef, contextType str
 		objectName, isObject := s.outputObject(f.typ)
 		if isObject {
 			b.WriteString("            if len(selection.children) == 0 { return err(\"graphql validation: object field requires a selection set\"); }\n")
-			fmt.Fprintf(b, "            let nested = graphql_validate_%s(selection.children, doc, variables, operation, context, limits, budget, depth + 1);\n", objectName)
+			fmt.Fprintf(b, "            let nested = graphql_validate_%s(selection.children, doc, variables, operation, context, limits, args_plan, budget, depth + 1);\n", objectName)
 			b.WriteString("            guard let _nested_ok = nested else let e = err_of(nested) { return err(e); }\n")
 		} else {
 			b.WriteString("            if len(selection.children) != 0 { return err(\"graphql validation: scalar field cannot have a selection set\"); }\n")
@@ -152,10 +261,12 @@ func generateValidator(b *strings.Builder, s *schema, d typeDef, contextType str
 
 func generateEmitter(b *strings.Builder, s *schema, d typeDef, contextType string) error {
 	parent := resolverParentType(s, d.name)
-	fmt.Fprintf(b, "fn graphql_emit_%s(parent: %s, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: %s, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {\n", d.name, parent, contextType)
+	fmt.Fprintf(b, "fn graphql_emit_%s(parent: %s, incoming: [__graphql.Selection], doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: %s, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {\n", d.name, parent, contextType)
 	b.WriteString("    if depth > limits.max_depth { return err(\"graphql execution: selection depth exceeds configured limit\"); }\n")
-	fmt.Fprintf(b, "    let expanded_result = __graphql.collect_selections_budget(doc, incoming, %q, variables, operation, limits, budget);\n", d.name)
-	b.WriteString("    guard let selections = expanded_result else let e = err_of(expanded_result) { return err(e); }\n")
+	fmt.Fprintf(b, "    let expansion_index = graphql_expansion_index(args_plan, %d, incoming);\n", executionObjectID(s, d.name))
+	b.WriteString("    if expansion_index < 0 { return err(\"graphql execution: validated selection expansion is missing\"); }\n")
+	b.WriteString("    let selections = args_plan.expansions[expansion_index].expanded;\n")
+	b.WriteString("    if !__graphql.charge_expanded_selection_budget(selections, budget) { return err(\"graphql validation: expanded selection count exceeds configured limit\"); }\n")
 	b.WriteString("    let out = builder.new_bytes();\n    out.write_byte(123);\n")
 	b.WriteString("    let written = 0;\n")
 	b.WriteString("    for i in 0..len(selections) {\n")
@@ -176,8 +287,10 @@ func generateEmitter(b *strings.Builder, s *schema, d typeDef, contextType strin
 	for _, f := range d.fields {
 		fmt.Fprintf(b, "        if field_name == %q {\n", f.name)
 		if len(f.args) > 0 {
-			fmt.Fprintf(b, "            let args_result = graphql_resolver_args_%s_%s(doc, selection, variables, operation, limits);\n", d.name, f.name)
-			b.WriteString("            guard let args = args_result else let e = err_of(args_result) { return err(\"graphql execution: arguments changed after validation: \" + e); }\n")
+			field := executionArgField{object: d.name, field: f.name}
+			fmt.Fprintf(b, "            let args_index = graphql_args_index_%s_%s(args_plan, selection);\n", d.name, f.name)
+			b.WriteString("            if args_index < 0 { return err(\"graphql execution: validated arguments are missing\"); }\n")
+			fmt.Fprintf(b, "            let args = args_plan.%s[args_index].args;\n", argsPlanField(field))
 		} else {
 			b.WriteString("            let args = __graphql.no_args();\n")
 		}
@@ -193,7 +306,7 @@ func generateEmitter(b *strings.Builder, s *schema, d typeDef, contextType strin
 			b.WriteString("                written = written + 1;\n                continue;\n")
 		}
 		b.WriteString("            }\n")
-		fmt.Fprintf(b, "            let encoded_result = graphql_encode_%s_%s_0(resolved, selection, doc, variables, operation, context, errors, limits, budget, depth);\n", d.name, f.name)
+		fmt.Fprintf(b, "            let encoded_result = graphql_encode_%s_%s_0(resolved, selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);\n", d.name, f.name)
 		b.WriteString("            guard let encoded = encoded_result else let e = err_of(encoded_result) {\n")
 		b.WriteString("                if e != \"graphql_nonnull_bubble\" {\n")
 		b.WriteString("                    let added = __graphql.error_add(errors, \"result could not be encoded\");\n")
@@ -224,7 +337,7 @@ func generateFieldEncoders(b *strings.Builder, s *schema, object typeDef, field 
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(b, "fn graphql_encode_%s_%s_%d(value: %s, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: %s, errors: __graphql.Errors, limits: __graphql.Limits, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {\n", object.name, field.name, level, typeName, contextType)
+		fmt.Fprintf(b, "fn graphql_encode_%s_%s_%d(value: %s, selection: __graphql.Selection, doc: __graphql.Document, variables: __graphql.Variables, operation: __graphql.Operation, context: %s, errors: __graphql.Errors, limits: __graphql.Limits, args_plan: graphql_ExecutionPlan, budget: __graphql.ExpansionBudget, depth: int) -> result[bytes, str] {\n", object.name, field.name, level, typeName, contextType)
 		valueName := "value"
 		if !t.nonNull {
 			valueName = fmt.Sprintf("unwrapped_%d", level)
@@ -235,7 +348,7 @@ func generateFieldEncoders(b *strings.Builder, s *schema, object typeDef, field 
 			fmt.Fprintf(b, "    let out_%d = builder.new_bytes();\n    out_%d.write_byte(91);\n", level, level)
 			fmt.Fprintf(b, "    for index_%d in 0..len(%s) {\n", level, valueName)
 			fmt.Fprintf(b, "        if index_%d > 0 { out_%d.write_byte(44); }\n", level, level)
-			fmt.Fprintf(b, "        let item_result_%d = graphql_encode_%s_%s_%d(%s[index_%d], selection, doc, variables, operation, context, errors, limits, budget, depth);\n", level, object.name, field.name, level+1, valueName, level)
+			fmt.Fprintf(b, "        let item_result_%d = graphql_encode_%s_%s_%d(%s[index_%d], selection, doc, variables, operation, context, errors, limits, args_plan, budget, depth);\n", level, object.name, field.name, level+1, valueName, level)
 			fmt.Fprintf(b, "        guard let item_%d = item_result_%d else let e = err_of(item_result_%d) {\n", level, level, level)
 			b.WriteString("            if e != \"graphql_nonnull_bubble\" {\n")
 			b.WriteString("                let added = __graphql.error_add(errors, \"result could not be encoded\");\n")
@@ -253,7 +366,7 @@ func generateFieldEncoders(b *strings.Builder, s *schema, object typeDef, field 
 			continue
 		}
 		if typeName, isObject := s.outputObject(t); isObject {
-			fmt.Fprintf(b, "    let encoded_result = graphql_emit_%s(%s, selection.children, doc, variables, operation, context, errors, limits, budget, depth + 1);\n", typeName, valueName)
+			fmt.Fprintf(b, "    let encoded_result = graphql_emit_%s(%s, selection.children, doc, variables, operation, context, errors, limits, args_plan, budget, depth + 1);\n", typeName, valueName)
 			fmt.Fprintf(b, "    guard let encoded = encoded_result else let e = err_of(encoded_result) {\n")
 			b.WriteString("        if e != \"graphql_nonnull_bubble\" {\n")
 			b.WriteString("            let added = __graphql.error_add(errors, \"result could not be encoded\");\n")
@@ -362,31 +475,76 @@ func generateValueNormalizer(b *strings.Builder, s *schema, prefix string, typ *
 	return nil
 }
 
+func generateResolverArg(b *strings.Builder, s *schema, object typeDef,
+	field fieldDef, arg inputValue) error {
+	typeName, err := s.slangType(arg.typ)
+	if err != nil {
+		return fmt.Errorf("%s.%s(%s): %w", object.name, field.name, arg.name, err)
+	}
+	name := "graphql_resolver_arg_" + object.name + "_" + field.name + "_" + arg.name
+	fmt.Fprintf(b, "fn %s(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[%s, str] {\n", name, typeName)
+	fmt.Fprintf(b, "    let found = __graphql.find_argument(doc, selection, %q);\n", arg.name)
+	b.WriteString("    let raw = b\"\";\n")
+	b.WriteString("    if let _ = found {\n")
+	b.WriteString("        guard let argument = found else { return err(\"graphql validation: argument lookup failed\"); }\n")
+	fmt.Fprintf(b, "        let variable_type = __graphql.validate_variable_type(doc, operation, argument.value, %q, %t);\n", arg.typ.String(), arg.hasDef)
+	b.WriteString("        guard let _type_ok = variable_type else let e = err_of(variable_type) { return err(e); }\n")
+	b.WriteString("        if __graphql.variable_missing(doc, argument.value, variables, operation) {\n")
+	if arg.hasDef {
+		defaultValue, err := valueJSON(arg.def)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(b, "            raw = b%s;\n", strconv.Quote(defaultValue))
+	} else if arg.typ.nonNull {
+		fmt.Fprintf(b, "            return err(%q);\n", "graphql validation: required variable for argument "+arg.name+" is missing")
+	} else {
+		b.WriteString("            return ok(none);\n")
+	}
+	b.WriteString("        } else {\n")
+	b.WriteString("            let value_result = __graphql.value_json(doc, argument.value, variables, operation, limits);\n")
+	b.WriteString("            guard let value = value_result else let e = err_of(value_result) { return err(e); }\n")
+	b.WriteString("            raw = value;\n        }\n")
+	b.WriteString("    } else {\n")
+	if arg.hasDef {
+		defaultValue, err := valueJSON(arg.def)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(b, "        raw = b%s;\n", strconv.Quote(defaultValue))
+	} else if arg.typ.nonNull {
+		fmt.Fprintf(b, "        return err(%q);\n", "graphql validation: required argument "+arg.name+" is missing")
+	} else {
+		b.WriteString("        return ok(none);\n")
+	}
+	b.WriteString("    }\n")
+	fmt.Fprintf(b, "    let normalized_result = graphql_normalize_arg_%s_%s_%s_0(raw, limits, 0);\n", object.name, field.name, arg.name)
+	b.WriteString("    guard let normalized = normalized_result else let e = err_of(normalized_result) { return err(e); }\n")
+	fmt.Fprintf(b, "    let typed_result: result[%s, str] = json.decode(normalized);\n    return typed_result;\n}\n\n", typeName)
+	return nil
+}
+
 func generateResolverArgs(b *strings.Builder, object typeDef, field fieldDef) {
 	fmt.Fprintf(b, "fn graphql_resolver_args_%s_%s(doc: __graphql.Document, selection: __graphql.Selection, variables: __graphql.Variables, operation: __graphql.Operation, limits: __graphql.Limits) -> result[%s, str] {\n", object.name, field.name, argsTypeName(object.name, field.name))
-	fmt.Fprintf(b, "    let args_json_result = __graphql.arguments_json(doc, selection, variables, operation, limits, %s);\n", argumentSpecs(nil, field))
-	b.WriteString("    guard let args_json = args_json_result else let e = err_of(args_json_result) { return err(e); }\n")
-	b.WriteString("    let fields_result = __graphql.parse_input_object(args_json, limits);\n")
-	b.WriteString("    guard let fields = fields_result else let e = err_of(fields_result) { return err(e); }\n")
-	allowed := make([]string, 0, len(field.args))
+	b.WriteString("    for i in 0..len(selection.arguments) {\n")
+	b.WriteString("        let actual = __graphql.span_text(doc.source, selection.arguments[i].name);\n")
 	for _, arg := range field.args {
-		allowed = append(allowed, strconv.Quote(arg.name))
+		fmt.Fprintf(b, "        if actual == %q { continue; }\n", arg.name)
 	}
-	fmt.Fprintf(b, "    let known_result = __graphql.validate_object_keys(fields, [%s]);\n", strings.Join(allowed, ", "))
-	b.WriteString("    guard let _known = known_result else let e = err_of(known_result) { return err(e); }\n")
-	b.WriteString("    let out = builder.new_bytes();\n    out.write_byte(123);\n    let written = 0;\n")
+	b.WriteString("        return err(\"graphql validation: unknown argument \" + actual);\n    }\n")
 	for i, arg := range field.args {
-		keyBytes := "b" + strconv.Quote(`"`+arg.name+`":`)
-		fmt.Fprintf(b, "    let value_result_%d = __graphql.variables_get(fields, %q);\n", i, arg.name)
-		fmt.Fprintf(b, "    if let raw_value_%d = value_result_%d {\n", i, i)
-		fmt.Fprintf(b, "        let normalized_result_%d = graphql_normalize_arg_%s_%s_%s_0(raw_value_%d, limits, 0);\n", i, object.name, field.name, arg.name, i)
-		fmt.Fprintf(b, "        guard let normalized_%d = normalized_result_%d else let e = err_of(normalized_result_%d) { return err(e); }\n", i, i, i)
-		fmt.Fprintf(b, "        if written > 0 { out.write_byte(44); }\n        out.write(%s);\n        out.write(normalized_%d);\n        written = written + 1;\n", keyBytes, i)
-		b.WriteString("    }\n")
+		fmt.Fprintf(b, "    let arg_result_%d = graphql_resolver_arg_%s_%s_%s(doc, selection, variables, operation, limits);\n", i, object.name, field.name, arg.name)
+		fmt.Fprintf(b, "    guard let arg_%d = arg_result_%d else let e = err_of(arg_result_%d) { return err(e); }\n", i, i, i)
 	}
-	b.WriteString("    out.write_byte(125);\n")
-	fmt.Fprintf(b, "    let typed_result: result[%s, str] = json.decode(out.finish());\n", argsTypeName(object.name, field.name))
-	b.WriteString("    return typed_result;\n}\n\n")
+	fmt.Fprintf(b, "    return ok(%s {\n", argsTypeName(object.name, field.name))
+	for i, arg := range field.args {
+		comma := ","
+		if i == len(field.args)-1 {
+			comma = ""
+		}
+		fmt.Fprintf(b, "        %s: arg_%d%s\n", arg.name, i, comma)
+	}
+	b.WriteString("    });\n}\n\n")
 }
 
 func argumentSpecs(s *schema, field fieldDef) string {

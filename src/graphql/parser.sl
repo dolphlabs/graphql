@@ -1041,6 +1041,17 @@ pub fn expansion_budget(limits: Limits) -> ExpansionBudget {
     return ExpansionBudget { count: 0, max: limits.max_nodes };
 }
 
+// Cached validation expansions still charge the execution budget once per
+// emitted object, matching collect_selections_budget without rescanning ASTs.
+pub fn charge_expanded_selection_budget(expanded: [Selection],
+                                        budget: ExpansionBudget) -> bool {
+    for i in 0..len(expanded) {
+        budget.count = budget.count + 1;
+        if budget.count > budget.max { return false; }
+    }
+    return true;
+}
+
 pub fn collect_selections_budget(doc: Document, selections: [Selection], type_name: str,
                                   variables: Variables, operation: Operation,
                                   limits: Limits, budget: ExpansionBudget)
