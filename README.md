@@ -34,7 +34,7 @@ type User { id: ID! name: String! role: Role! }
 ```
 
 By default, generated resolvers use `graphql.Context`. Pass another named
-Slang type with `-context app.RequestContext` when the app owns its context.
+slang type with `-context app.RequestContext` when the app owns its context.
 Schema names that would collide with generated identifiers stop generation
 with an error. Run the generator with `-check` in CI to detect stale output.
 
@@ -91,7 +91,7 @@ bubble to the nearest nullable field.
 On the same one-worker macOS query benchmark, prepared execution returned
 34,822 requests/s with 25.5 µs p50 and 138.5 µs p99; Go
 `graph-gophers/graphql-go` v1.10.2 returned 47,999 requests/s with 19.3 µs
-p50 and 87.1 µs p99. The parse-per-request Slang API returned 14,878
+p50 and 87.1 µs p99. The parse-per-request slang API returned 14,878
 requests/s. Prepared execution cuts its allocation count from 494 to 278
 objects per request. These are local CPU-only smoke numbers, not server or
 cloud results; the full table and method are in
@@ -106,7 +106,7 @@ supported. Duplicate response names are rejected to avoid ambiguous output.
 
 Subscriptions, schema introspection, federation, interfaces, unions, custom
 scalars, custom directives and block strings are outside v1. SDL names must
-map to valid Slang identifiers; code generation refuses collisions rather
+map to valid slang identifiers; code generation refuses collisions rather
 than renaming schema fields silently.
 
 ## Bounds and batching

@@ -8,7 +8,7 @@ Repeated GraphQL requests reparsed the same query and allocated a fresh AST
 each time. Generated validation also normalized and decoded typed resolver
 arguments once during validation and again during execution. The initial local
 one-worker comparison was about 3.6x slower than Go and allocated about 653
-Slang GC objects per request.
+slang GC objects per request.
 
 ## Design delivered
 
@@ -42,19 +42,19 @@ Slang GC objects per request.
 ## Local benchmark
 
 This is a local macOS CPU smoke test, not an HTTP server or cloud result. The
-same operation, variables, generated schema and resolver were used for Slang
+same operation, variables, generated schema and resolver were used for slang
 and `graph-gophers/graphql-go` v1.10.2. Throughput ran 100,000 requests;
 latency sampled 10,000 requests. Three interleaved rounds produced six samples
 per implementation. Values below are medians. Allocation accounting differs
-between Slang's GC and Go's runtime, so compare it directionally.
+between slang's GC and Go's runtime, so compare it directionally.
 
 | Path | Throughput | p50 | p99 | Allocated bytes/request | Objects/request |
 |---|---:|---:|---:|---:|---:|
-| Slang `graphql_execute` | 14,878 req/s | 54.5 µs | 188.5 µs | 51.8 KB | 494 |
-| Slang prepared | 34,822 req/s | 25.5 µs | 138.5 µs | 34.6 KB | 278 |
+| slang `graphql_execute` | 14,878 req/s | 54.5 µs | 188.5 µs | 51.8 KB | 494 |
+| slang prepared | 34,822 req/s | 25.5 µs | 138.5 µs | 34.6 KB | 278 |
 | Go `Schema.Exec` | 47,999 req/s | 19.3 µs | 87.1 µs | 8.7 KB | 162 |
 
-The prepared API is 2.34x the one-shot Slang throughput on this query and
+The prepared API is 2.34x the one-shot slang throughput on this query and
 reduces median p50 by 53% and p99 by 27%. It remains about 1.38x slower than Go
 in throughput, with p50 1.32x and p99 1.59x higher. The one-shot path remains
 about 3.23x slower than Go. These are CPU-only measurements; RSS was not
