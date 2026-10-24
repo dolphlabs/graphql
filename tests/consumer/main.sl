@@ -91,6 +91,27 @@ let prepared_repeat_result = graphql_execute_prepared(
     prepared, fetch_variables, __graphql.context_new());
 guard let prepared_repeat = prepared_repeat_result else let e = err_of(prepared_repeat_result) { panic(e); }
 if prepared_repeat != query_response { panic("prepared GraphQL query changed on reuse"); }
+let plan_cache_result = __graphql.plan_cache_new(8, __graphql.default_limits());
+guard let plan_cache = plan_cache_result else let e = err_of(plan_cache_result) { panic(e); }
+for round in 0..2 {
+    let cached_result = graphql_execute_cached(
+        plan_cache, fetch_query, "Fetch", fetch_variables,
+        __graphql.context_new(), __graphql.default_limits());
+    guard let cached_response = cached_result else let e = err_of(cached_result) { panic(e); }
+    if cached_response != query_response { panic("cached GraphQL response differs from graphql_execute"); }
+}
+if __graphql.plan_cache_hits(plan_cache) != 1 || __graphql.plan_cache_misses(plan_cache) != 1 {
+    panic("GraphQL plan cache did not reuse the planned query");
+}
+// A query that does not parse is never kept. (One that parses but names an
+// unknown field is: field validation depends on the variables, so it runs
+// on every request, after planning.)
+let cached_invalid = graphql_execute_cached(
+    plan_cache, "{ nope", "", b"{}", __graphql.context_new(), __graphql.default_limits());
+guard let cached_invalid_response = cached_invalid else let e = err_of(cached_invalid) { panic(e); }
+if __graphql.plan_cache_size(plan_cache) != 1 { panic("GraphQL plan cache kept an invalid query"); }
+let invalid_text = strings.from_bytes(cached_invalid_response, 0, len(cached_invalid_response));
+if !strings.contains(invalid_text, "\"data\":null") { panic("cached invalid query did not fail: " + invalid_text); }
 let mutation_result = graphql_execute(
     "mutation Rename($id: ID!) { rename(id: $id, name: \"Sam\") { id name } }",
     "Rename", b"{\"id\":\"8\"}", __graphql.context_new(), __graphql.default_limits());
