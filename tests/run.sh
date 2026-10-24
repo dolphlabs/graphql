@@ -33,6 +33,10 @@ if [ "$gc_actual" != "$expected" ]; then
     exit 1
 fi
 
+# The executor's allocation budgets: a regression that allocates per field
+# again fails here rather than in a benchmark nobody reran.
+SLANGC="$slangc" ITERATIONS=5000 "$repo/bench/execute/run.sh" --check
+
 mkdir "$run_dir/runtime-tests"
 cp "$repo"/src/graphql/*.sl "$repo"/tests/runtime/*.sl "$run_dir/runtime-tests/"
 (cd "$run_dir/runtime-tests" && "$slangc" test . -v)

@@ -2,3 +2,4 @@ name graphql
 version 0.1.0
 exclude cmd/graphqlc
 exclude tests
+exclude bench

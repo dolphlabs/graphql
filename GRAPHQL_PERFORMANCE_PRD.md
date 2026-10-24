@@ -61,6 +61,42 @@ about 3.23x slower than Go. These are CPU-only measurements; RSS was not
 available from the sandbox's process accounting, and network/server behavior
 remains unmeasured.
 
+## Follow-up: names, response check, plan cache (2026-10-24)
+
+Profiling the prepared path on the consumer's Fetch operation (an
+input-object argument, a fragment, `@include`, `__typename`; 103-byte
+response) found two costs that do not depend on the request:
+
+- Every visit to a field built its name and response key from source spans:
+  two allocations per field, in both validation and execution. The parser
+  now stores `name_text`, `response_text` and `condition_text` on each
+  `Selection` (and name and condition on each `Fragment`), and
+  `selection_name`/`response_name` return them.
+- `response` re-parsed the whole `data` JSON to check it. Generated
+  executors now call `execution_response`, which skips that check: their
+  data is their own emitter's output. `response` keeps the check for
+  everything else.
+
+`graphql_execute_cached` adds an explicit, caller-owned `PlanCache` keyed by
+query text, for clients that resend queries without persisting them. It is
+bounded (FIFO), keeps only successful plans, and is bypassed under limits
+other than its own; it is not a global cache.
+
+`bench/execute/run.sh`, same laptop, slangc 0.2.3, one run of 20,000
+requests (time is a single-run reading; allocations are exact):
+
+| Path | Before: allocs / bytes / time | After: allocs / bytes / time |
+|---|---:|---:|
+| `graphql_execute` | 949 / 89 KB / ~131 us | 834 / 76 KB / ~110 us |
+| prepared | 618 / 62 KB / ~76 us | 487 / 48 KB / ~56 us |
+| cached | -- | 489 / 48 KB / ~60 us |
+
+`tests/run.sh` fails above 840, 495 and 500 allocations. What remains, by
+profile of the prepared path: input-object argument coercion (about a
+third, through JSON normalization per request), `parse_variables` (about
+12%), and the runtime's per-call safepoint and thread-local reads (about
+30%, a slang compiler cost tracked there).
+
 ## Next measurement
 
 Benchmark the prepared path under a real HTTP server with multiple persisted

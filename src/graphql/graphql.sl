@@ -77,6 +77,10 @@ pub gc struct VariableDef {
     default_value: Value
 }
 
+// The *_text fields are the spans' text, made once by the parser. Validation
+// and execution look a selection's names up for every field they visit, and
+// a planned document (plan.sl) is reused across requests, so building them
+// from the spans each time cost two allocations per field per pass.
 pub gc struct Selection {
     kind: int,
     name: Span,
@@ -84,7 +88,10 @@ pub gc struct Selection {
     type_condition: Span,
     arguments: [Argument],
     directives: [Directive],
-    children: [Selection]
+    children: [Selection],
+    name_text: str,
+    response_text: str,
+    condition_text: str
 }
 
 pub gc struct Operation {
@@ -99,7 +106,9 @@ pub gc struct Fragment {
     name: Span,
     type_condition: Span,
     directives: [Directive],
-    selections: [Selection]
+    selections: [Selection],
+    name_text: str,
+    condition_text: str
 }
 
 pub gc struct Document {
