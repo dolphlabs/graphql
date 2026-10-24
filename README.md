@@ -80,6 +80,16 @@ field arguments and selections before any resolver runs. The handle retains
 the parsed document until it becomes unreachable, and keeps the limits chosen
 at preparation time. Use one handle per operation and treat it as read-only.
 `graphql_execute` remains the convenient parse-per-request path.
+When clients resend the same query text without persisting it, create one
+bounded `__graphql.PlanCache` at startup (`plan_cache_new(max_entries,
+limits)`) and call `graphql_execute_cached(cache, query, operation_name,
+variables, context, limits)`: the first request for a query plans it as
+`graphql_prepare` would, later ones reuse that plan. Only queries that parse
+and select an operation are kept, the oldest is dropped when the cache is
+full, and a call with other limits plans without the cache. The cache holds
+up to `max_entries` query texts and their syntax trees; size it for the
+operations the service serves. Field and variable validation still run on
+every request.
 The returned `bytes` contains the GraphQL JSON envelope. Parse and validation
 failures return `data: null` with a bounded `errors` array. A resolver failure
 uses the safe message `resolver failed`; its private error value is not sent to
@@ -96,6 +106,9 @@ requests/s. Prepared execution cuts its allocation count from 494 to 278
 objects per request. These are local CPU-only smoke numbers, not server or
 cloud results; the full table and method are in
 [GRAPHQL_PERFORMANCE_PRD.md](GRAPHQL_PERFORMANCE_PRD.md).
+`bench/execute/run.sh` reports time and allocations per request for the
+consumer's larger Fetch operation through all three entry points, and
+`tests/run.sh` fails above its allocation budgets.
 
 The runtime supports query and mutation operations, aliases, variables and
 defaults, nested selections, fragments and inline fragments on object types,
