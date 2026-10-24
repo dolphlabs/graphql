@@ -168,16 +168,9 @@ pub gc struct graphql_PreparedQuery { document: __graphql.Document, operation: _
 struct graphql_ParsedQuery { document: __graphql.Document, operation: __graphql.Operation }
 
 fn graphql_parse_query(query: str, operation_name: str, limits: __graphql.Limits) -> result[graphql_ParsedQuery, str] {
-    let parsed_result = __graphql.parse(query, limits);
-    guard let doc = parsed_result else let e = err_of(parsed_result) { return err(e); }
-    let condition_result = __graphql.type_conditions(doc, limits);
-    guard let conditions = condition_result else let e = err_of(condition_result) { return err(e); }
-    for i in 0..len(conditions) {
-        if !graphql_schema_has_object_type(conditions[i]) { return err("graphql validation: unknown object type " + conditions[i]); }
-    }
-    let operation_result = __graphql.validate_document(doc, operation_name);
-    guard let operation = operation_result else let e = err_of(operation_result) { return err(e); }
-    return ok(graphql_ParsedQuery { document: doc, operation: operation });
+    let planned = __graphql.plan_uncached(query, operation_name, limits, graphql_schema_has_object_type);
+    guard let plan = planned else let e = err_of(planned) { return err(e); }
+    return ok(graphql_ParsedQuery { document: plan.document, operation: plan.operation });
 }
 
 pub fn graphql_prepare(query: str, operation_name: str, limits: __graphql.Limits) -> result[graphql_PreparedQuery, str] {
@@ -194,6 +187,15 @@ pub fn graphql_execute(query: str, operation_name: str, variables_json: bytes, c
 
 pub fn graphql_execute_prepared(prepared: graphql_PreparedQuery, variables_json: bytes, context: graphql.Context) -> result[bytes, str] {
     return graphql_execute_document(prepared.document, prepared.operation, variables_json, context, prepared.limits);
+}
+
+// graphql_execute with each query's plan (parse, type conditions, validated
+// operation) kept in a caller-owned __graphql.PlanCache, keyed by the query
+// text: for clients that resend the same query without persisting it.
+pub fn graphql_execute_cached(cache: __graphql.PlanCache, query: str, operation_name: str, variables_json: bytes, context: graphql.Context, limits: __graphql.Limits) -> result[bytes, str] {
+    let planned = __graphql.plan(cache, query, operation_name, limits, graphql_schema_has_object_type);
+    guard let plan = planned else let e = err_of(planned) { return __graphql.failure(e, limits); }
+    return graphql_execute_document(plan.document, plan.operation, variables_json, context, limits);
 }
 
 fn graphql_execute_document(doc: __graphql.Document, operation: __graphql.Operation, variables_json: bytes, context: graphql.Context, limits: __graphql.Limits) -> result[bytes, str] {
@@ -221,7 +223,7 @@ fn graphql_execute_document(doc: __graphql.Document, operation: __graphql.Operat
                 guard let _ok = added else let add_error = err_of(added) { return err(add_error); }
             }
         }
-        return __graphql.response(data, errors, limits);
+        return __graphql.execution_response(data, errors, limits);
     }
     if operation.kind == __graphql.OP_MUTATION {
         let validation_budget = __graphql.expansion_budget(limits);
@@ -236,7 +238,7 @@ fn graphql_execute_document(doc: __graphql.Document, operation: __graphql.Operat
                 guard let _ok = added else let add_error = err_of(added) { return err(add_error); }
             }
         }
-        return __graphql.response(data, errors, limits);
+        return __graphql.execution_response(data, errors, limits);
     }
     return __graphql.failure("unsupported operation kind", limits);
 }

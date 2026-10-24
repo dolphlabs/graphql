@@ -103,6 +103,20 @@ pub fn response(data: bytes, errors: Errors, limits: Limits)
     if !graphql_response_data_valid(data, limits) {
         return err("graphql response: data must be one bounded JSON object or null");
     }
+    return graphql_write_response(data, errors, limits);
+}
+
+// For generated executors only: `data` is their own emitter's output, an
+// object or null written field by field from typed values, so it is not
+// parsed again here -- that re-parse was most of a small response's cost.
+// Data from anywhere else goes through response, which checks it.
+pub fn execution_response(data: bytes, errors: Errors, limits: Limits)
+                          -> result[bytes, str] {
+    return graphql_write_response(data, errors, limits);
+}
+
+fn graphql_write_response(data: bytes, errors: Errors, limits: Limits)
+                          -> result[bytes, str] {
     if len(data) > limits.max_response_bytes {
         return err("graphql response: data exceeds configured byte limit");
     }
@@ -127,7 +141,7 @@ pub fn response(data: bytes, errors: Errors, limits: Limits)
     if out.size() > limits.max_response_bytes {
         return err("graphql response exceeds configured byte limit");
     }
-    return ok(out.finish());
+    return ok(out.take());
 }
 
 pub fn failure(message: str, limits: Limits) -> result[bytes, str] {

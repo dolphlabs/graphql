@@ -114,7 +114,7 @@ pub fn operation_name(doc: Document, operation: Operation) -> str {
 
 pub fn fragment(doc: Document, name: str) -> opt[Fragment] {
     for i in 0..len(doc.fragments) {
-        if span_text(doc.source, doc.fragments[i].name) == name {
+        if doc.fragments[i].name_text == name {
             return some(doc.fragments[i]);
         }
     }
@@ -122,14 +122,11 @@ pub fn fragment(doc: Document, name: str) -> opt[Fragment] {
 }
 
 pub fn selection_name(doc: Document, selection: Selection) -> str {
-    return span_text(doc.source, selection.name);
+    return selection.name_text;
 }
 
 pub fn response_name(doc: Document, selection: Selection) -> str {
-    if selection.alias.end > selection.alias.start {
-        return span_text(doc.source, selection.alias);
-    }
-    return selection_name(doc, selection);
+    return selection.response_text;
 }
 
 fn graphql_limits_valid(lim: Limits) -> bool {
@@ -272,7 +269,9 @@ fn graphql_parse_fragment(p: Parser) -> result[Fragment, str] {
         return err(graphql_error(p, "node count exceeds configured limit"));
     }
     return ok(Fragment { name: name, type_condition: type_condition,
-                         directives: dirs, selections: selections });
+                         directives: dirs, selections: selections,
+                         name_text: span_text(p.source, name),
+                         condition_text: span_text(p.source, type_condition) });
 }
 
 fn graphql_parse_variable_defs(p: Parser) -> result[[VariableDef], str] {
@@ -483,9 +482,16 @@ fn graphql_new_selection(p: Parser, kind: int, name: Span, alias: Span,
     if p.nodes > p.limits.max_nodes {
         return err(graphql_error(p, "node count exceeds configured limit"));
     }
+    let name_text = span_text(p.source, name);
+    let response_text = name_text;
+    if alias.end > alias.start {
+        response_text = span_text(p.source, alias);
+    }
     return ok(Selection { kind: kind, name: name, alias: alias,
                           type_condition: condition, arguments: arguments,
-                          directives: directives, children: children });
+                          directives: directives, children: children,
+                          name_text: name_text, response_text: response_text,
+                          condition_text: span_text(p.source, condition) });
 }
 
 fn graphql_parse_arguments(p: Parser, depth: int) -> result[[Argument], str] {
@@ -1136,7 +1142,7 @@ fn graphql_expand_selections(doc: Document, selections: [Selection], type_name: 
             continue;
         }
         if selection.kind == SELECTION_INLINE {
-            if span_text(doc.source, selection.type_condition) != type_name { continue; }
+            if selection.condition_text != type_name { continue; }
             let nested = graphql_expand_selections(
                 doc, selection.children, type_name, variables, operation,
                 limits, expanded, budget, depth + 1);
@@ -1144,12 +1150,12 @@ fn graphql_expand_selections(doc: Document, selections: [Selection], type_name: 
             continue;
         }
         if selection.kind == SELECTION_SPREAD {
-            let name = span_text(doc.source, selection.name);
+            let name = selection.name_text;
             let found = fragment(doc, name);
             guard let fragment_value = found else {
                 return err("graphql validation: unknown fragment " + name);
             }
-            if span_text(doc.source, fragment_value.type_condition) != type_name { continue; }
+            if fragment_value.condition_text != type_name { continue; }
             let fragment_include = should_include(
                 doc, fragment_value.directives, variables, operation, limits);
             guard let include_fragment = fragment_include else let e = err_of(fragment_include) {
