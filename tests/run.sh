@@ -6,7 +6,7 @@ slangc=${SLANGC:-slangc}
 run_dir=$(mktemp -d "${TMPDIR:-/tmp}/graphql-test.XXXXXX")
 trap 'rm -rf "$run_dir"' EXIT HUP INT TERM
 
-(cd "$repo/cmd/graphqlc" && go test ./... && go vet ./... && go build -o "$run_dir/graphqlc" .)
+("$slangc" test "$repo/cmd/graphqlc" -v && "$slangc" "$repo/cmd/graphqlc/main.sl" -o "$run_dir/graphqlc")
 "$run_dir/graphqlc" -schema "$repo/tests/schema/schema.graphql" \
     -out "$run_dir/schema.gen.sl"
 cmp "$repo/tests/consumer/schema.gen.sl" "$run_dir/schema.gen.sl"
