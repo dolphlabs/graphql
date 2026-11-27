@@ -11,20 +11,18 @@ The design and current limits are recorded in [GRAPHQL_PRD.md](GRAPHQL_PRD.md).
 ## Install and generate
 
 ```text
-pkg graphql git https://github.com/dolphlabs/graphql.git tag v0.1.0 dir src/graphql
+pkg graphql git https://github.com/dolphlabs/graphql.git tag v0.2.0 dir src/graphql
 ```
 
-Build the standalone generator with Go 1.22 or later:
+Build the standalone generator with `slangc`:
 
 ```sh
-cd cmd/graphqlc
-go build -o ../../bin/graphqlc .
-cd ../..
+slangc cmd/graphqlc/main.sl -o ./bin/graphqlc
 ./bin/graphqlc -schema schema.graphql -out src/generated/schema.gen.sl
 ```
 
-The generated file is committed with the app. Building the app then needs only
-`slangc`; it does not need Go or the SDL compiler.
+The generated file is committed with the app. Building the app itself does not
+re-run the SDL compiler.
 
 ```graphql
 enum Role { USER ADMIN }
@@ -145,7 +143,7 @@ SLANGC=slangc sh tests/run.sh
 The runner checks generator goldens and determinism, compiles and runs a
 generated consumer, exercises query/mutation execution and hostile inputs,
 runs generated requests and runtime tests under minor-GC verification, and
-keeps tests outside the installed source directory. The Go generator, tests
+keeps tests outside the installed source directory. The standalone generator, tests
 and benchmark files are excluded from dependency downloads; only
 `src/graphql` is installed. A multi-operation HTTP server benchmark, retained
 AST RSS measurement and cloud comparison remain to be collected.
